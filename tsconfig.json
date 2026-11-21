@@ -1,0 +1,21 @@
+{
+  // Type-check only. Node runs the .ts files directly by stripping the types.
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "strict": true,
+    "noEmit": true,
+    "erasableSyntaxOnly": true,          // only TS that Node can strip (no enums, no namespaces)
+    "verbatimModuleSyntax": true,        // use `import type` for types
+    "allowImportingTsExtensions": true,  // imports end in .ts: import { x } from "./x.ts"
+    "noUncheckedIndexedAccess": true,    // arr[0] is `T | undefined`, like Go's bounds checks
+    "noUnusedLocals": true,              // unused variable/import = error (Go does this too)
+    "noUnusedParameters": true,          // unused function parameter = error
+    "noImplicitReturns": true,           // every code path must return
+    "noFallthroughCasesInSwitch": true,  // each `case` must break/return (Go never falls through)
+    "exactOptionalPropertyTypes": true,  // `x?: number` means "absent", not "may be undefined"
+    "noPropertyAccessFromIndexSignature": true, // map-like objects need obj["key"], so you see it may be missing
+    "types": ["node"]
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,23 @@
+{
+  "name": "pios",
+  "version": "1.0.0",
+  "description": "An interactive part of the Pi Home Server.",
+  "license": "MIT",
+  "author": "#Shivamingale3",
+  "type": "module",
+  "main": "src/main.ts",
+  "scripts": {
+    "start": "node src/main.ts",
+    "dev": "node --watch src/main.ts",
+    "check": "tsc --noEmit && oxlint",
+    "lint": "oxlint"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "oxlint": "^1.94.0",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=23.6"
+  }
+}
