@@ -55,7 +55,7 @@ fn cpu_temp(s: &Snapshot) -> Option<f64> {
     s.cpu.temp_c
 }
 
-/// Values from PiDex (PI.md §5).
+/// Same values PiDex used.
 pub const THRESHOLDS: [Threshold; 4] = [
     Threshold {
         metric: "cpu.percent",

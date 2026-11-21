@@ -1,2 +1,11 @@
 target/
 data/
+
+# Kept local: home-server details, private notes and mockups with real data
+PI.md
+PI_CHANGES.md
+PLAN.md
+AGENTS.md
+CLAUDE.md
+.claude/
+mockups/
