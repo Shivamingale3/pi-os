@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+
+  build-arm64:
+    name: build arm64 (static musl)
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-musl
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - run: cargo zigbuild --locked --release --target aarch64-unknown-linux-musl
+      - name: Check the binary is static arm64
+        run: |
+          f=target/aarch64-unknown-linux-musl/release/pios
+          file "$f"
+          file "$f" | grep -q "ARM aarch64"
+          file "$f" | grep -qE "statically linked|static-pie linked"
+          ls -l "$f"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pios-aarch64-linux-musl
+          path: target/aarch64-unknown-linux-musl/release/pios
+          retention-days: 14
