@@ -1633,13 +1633,13 @@ fn status_marker(st: Status) -> Marker {
     }
 }
 
-pub const TILE_W: [f32; 3] = [146.0, 146.0, 148.0];
-const TILE_H: f32 = 72.0;
-
-/// Tiles per page: a full 3 × 3 grid when everything fits, else 2 rows + the pager.
-pub fn tiles_per_page(n: usize) -> usize {
-    if n <= 9 { 9 } else { 6 }
+/// Rows per page in the Apps and Host lists: 44 px rows (touch targets, 8 px apart), so every
+/// name gets the full width. 4 fit when there is no pager; with the pager, 3.
+pub fn list_rows(n: usize) -> usize {
+    if n <= 4 { 4 } else { 3 }
 }
+/// Taller than the 44 px minimum: easier to hit, and 4 rows still fit without the pager.
+const ROW_H: f32 = 54.0;
 
 /// The three tabs of the Services screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1766,19 +1766,18 @@ pub fn services(
     b.t
 }
 
-/// Tiles, 3 × 3, or 2 rows and the pager when there are more than 9.
+/// One row per container or host service: status, full name, health or uptime and memory.
+/// More than 4: 3 per page and the ‹ › pager.
 fn grid(b: &mut B, list: &[&Service], page: usize) {
-    let per = tiles_per_page(list.len());
+    let per = list_rows(list.len());
     let pages = list.len().div_ceil(per).max(1);
     let page = page.min(pages - 1);
     let name_style = Style::new(Face::SemiBold, size::TITLE.0);
     for (i, s) in list.iter().skip(page * per).take(per).enumerate() {
-        let (row, col) = (i / 3, i % 3);
-        let x = M + TILE_W[..col].iter().map(|w| w + GAP).sum::<f32>();
-        let r = Rect::new(x, TOP + row as f32 * (TILE_H + GAP), TILE_W[col], TILE_H);
+        let r = Rect::new(M, TOP + i as f32 * (ROW_H + GAP), WIDTH, ROW_H);
         let st = service_status(s);
         let sc = status_colors(st);
-        let tile = b.t.add(
+        let row = b.t.add(
             None,
             "service",
             r,
@@ -1792,28 +1791,32 @@ fn grid(b: &mut B, list: &[&Service], page: usize) {
                 border: (st != Status::Good).then_some(sc.border),
             },
         );
-        b.t.nav(tile, Nav::Container(crate::services::key(&s.id)));
-        b.t.pad(tile, PAD_TILE);
+        b.t.nav(row, Nav::Container(crate::services::key(&s.id)));
+        b.t.pad(row, PAD_TILE);
         let inner = r.inset(PAD_TILE);
         b.t.add(
-            Some(tile),
+            Some(row),
             "marker",
-            Rect::new(inner.right() - 10.0, inner.y + 6.0, 10.0, 10.0),
+            Rect::new(inner.x, inner.cy() - 5.0, 10.0, 10.0),
             Paint::Marker(status_marker(st)),
         );
+        // the detail on the right takes what it needs (up to 45 %), the name gets the rest
+        let line = tile_line(s);
+        let lw = b.f.width(&body(), &line).min(inner.w * 0.45);
+        let nx = inner.x + 10.0 + GAP;
         b.text(
-            tile,
+            row,
             "name",
-            Rect::new(inner.x, inner.y, inner.w - 10.0 - GAP, 22.0),
+            Rect::new(nx, inner.y, inner.right() - lw - GAP - nx, inner.h),
             &s.name,
             name_style,
             INK,
         );
-        b.text(
-            tile,
+        b.text_right(
+            row,
             "line",
-            Rect::new(inner.x, inner.bottom() - 18.0, inner.w, 18.0),
-            &tile_line(s),
+            Rect::new(inner.right() - lw, inner.y, lw, inner.h),
+            &line,
             body(),
             if st == Status::Good { INK2 } else { sc.text },
         );
