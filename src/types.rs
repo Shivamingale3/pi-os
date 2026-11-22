@@ -57,6 +57,9 @@ pub struct Network {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
+    /// Docker's full container ID (empty in snapshots stored before v0.4)
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     /// Docker's State: "running", "exited", "restarting", …
     pub state: String,

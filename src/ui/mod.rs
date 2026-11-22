@@ -164,6 +164,7 @@ fn sample_snapshot(
             total,
             containers: (0..total)
                 .map(|i| Container {
+                    id: format!("{i:064x}"),
                     name: format!("app{i}"),
                     state: if i < running { "running" } else { "exited" }.into(),
                 })

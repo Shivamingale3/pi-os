@@ -52,7 +52,7 @@ SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
 SystemCallErrorNumber=EPERM
-ProtectProc=invisible
+# ProtectProc stays at the default: the CPU screen shows the busiest processes (read-only /proc)
 IPAddressDeny=any
 RemoveIPC=yes
 KeyringMode=private
