@@ -55,6 +55,36 @@ An incident **opens after 30 s** of the bad condition without a break, and **clo
 of the clear condition without a break, so short spikes and flapping are ignored. Start and end
 times are the first bad and first clear readings.
 
+## Screen (in progress)
+
+`pios ui` draws the 480 × 320 screens from the agent's API with **tiny-skia** (anti-aliased 2D) and
+**ab_glyph** (TrueType text), using the bundled Inter and JetBrains Mono fonts (SIL OFL, in
+`assets/fonts/`). So far it draws **Home**, to a PNG or a laptop preview window. Output to the panel
+comes later.
+
+```bash
+pios ui --png home.png                          # one frame from the running agent
+pios ui --sample worst --png worst.png          # a built-in example: good, attention, down, waiting, worst
+pios ui --check                                 # prove the spacing rules on every example
+cargo run --features preview -- ui --preview    # live window on a laptop (never in the Pi build)
+```
+
+Every element is placed as a box before anything is drawn, and `layout::check` proves these rules on
+the boxes:
+
+| Rule | Value |
+|---|---|
+| distance from every screen edge | 12 px |
+| between any two blocks or touch targets | 8 px |
+| inside cards / tiles and buttons | 16 px / 12 px |
+| between any two elements inside a block | at least 4 px |
+| touch targets | at least 44 × 44 px |
+| text | must fit its slot: big numbers shrink (down to 20 px), other text is cut with "…" |
+
+Tests run the check on more than 5,000 combinations of extreme data (long hostnames, 100 %, 105 °C,
+1023 GB, 120 containers, 12 open problems) and compare each example with a golden PNG in
+`tests/golden/`. After an intended visual change, run `UPDATE_GOLDEN=1 cargo test`.
+
 ## Build
 
 ```bash
@@ -62,8 +92,8 @@ cargo test && cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-Dependencies: `rusqlite` (SQLite bundled), `serde`, `serde_json`, `libc`. No async runtime and no
-HTTP crate.
+Dependencies: `rusqlite` (SQLite bundled), `serde`, `serde_json`, `libc`, `tiny-skia`, `ab_glyph`
+(and `minifb` for the laptop preview only). No async runtime and no HTTP crate.
 
 ## CI and releases
 
@@ -88,6 +118,8 @@ git tag v0.1.0 && git push origin v0.1.0
 | `src/rules.rs` | incident engine: pure logic, no clock, no I/O |
 | `src/store.rs` | SQLite (WAL): trend, incidents, pruning, reads |
 | `src/api.rs` | the HTTP server on the unix socket |
+| `src/http.rs` | the small HTTP client for unix sockets (Docker, the agent's API) |
+| `src/ui/` | the screens: `theme` (tokens and spacing rules), `canvas` (drawing), `layout` (box tree, check, render), `home` |
 | `src/main.rs` | CLI, the loop, signal handling |
 
 ## License
