@@ -88,17 +88,36 @@ fn sha256(path: &Path) -> Result<String> {
         .ok_or_else(|| err("sha256sum gave no output"))
 }
 
-fn healthy() -> bool {
+/// Waits for the agent's first snapshot; returns a one-line summary of it, or None on timeout.
+fn healthy() -> Option<String> {
     let start = Instant::now();
     while start.elapsed() < HEALTH_TIMEOUT {
-        if let Ok((200, _)) =
+        if let Ok((200, body)) =
             crate::http::get(Path::new(API_SOCKET), "/now", Duration::from_secs(2))
         {
-            return true;
+            return Some(summary(&body));
         }
         std::thread::sleep(Duration::from_secs(1));
     }
-    false
+    None
+}
+
+/// "cpu 2% · 41 °C · ram 19% · disk 11% · docker 9/9" from a /now body (unknown parts left out).
+pub fn summary(now_json: &str) -> String {
+    let Ok(s) = serde_json::from_str::<crate::types::Snapshot>(now_json) else {
+        return "agent answered".into();
+    };
+    let mut parts = vec![format!("cpu {:.0}%", s.cpu.percent)];
+    if let Some(t) = s.cpu.temp_c {
+        parts.push(format!("{t:.0} °C"));
+    }
+    parts.push(format!("ram {:.0}%", s.memory.used_percent));
+    parts.push(format!("disk {:.0}%", s.disk.used_percent));
+    parts.push(match &s.docker {
+        Some(d) => format!("docker {}/{}", d.running, d.total),
+        None => "docker unreachable".into(),
+    });
+    parts.join(" · ")
 }
 
 /// Puts `src` at BIN atomically (copy beside it, then rename over it).
@@ -169,21 +188,20 @@ pub fn update(arg: &str) -> Result<()> {
     place(&bin_s)?;
     println!("installed {arg}; previous kept as {PREV}");
 
-    if let Err(e) = setup_with(BIN).and_then(|_| {
-        if healthy() {
-            Ok(())
-        } else {
-            Err(err("the agent didn't answer /now within 15 s"))
+    let check = setup_with(BIN)
+        .and_then(|_| healthy().ok_or_else(|| err("the agent didn't answer /now within 15 s")));
+    let health = match check {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("update failed: {e}; rolling back");
+            rollback()?;
+            return Err(err(format!(
+                "update to {arg} failed and was rolled back: {e}"
+            )));
         }
-    }) {
-        eprintln!("update failed: {e}; rolling back");
-        rollback()?;
-        return Err(err(format!(
-            "update to {arg} failed and was rolled back: {e}"
-        )));
-    }
+    };
     let _ = fs::remove_dir_all(&dir);
-    println!("updated to {arg}, agent healthy");
+    println!("updated to {arg}, agent healthy: {health}");
     Ok(())
 }
 
@@ -198,12 +216,12 @@ fn rollback() -> Result<()> {
     place(PREV)?;
     setup_with(BIN)?;
     let v = version_of(BIN).unwrap_or_else(|| "?".into());
-    if !healthy() {
+    let Some(health) = healthy() else {
         return Err(err(format!(
             "rolled back to {v}, but the agent still doesn't answer"
         )));
-    }
-    println!("rolled back to {v}, agent healthy (the replaced binary is at {failed})");
+    };
+    println!("rolled back to {v}, agent healthy: {health} (the replaced binary is at {failed})");
     Ok(())
 }
 
@@ -249,6 +267,16 @@ mod tests {
         ] {
             assert!(!is_tag(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn health_summary() {
+        let s = crate::rules::tests::snap(0, 2.4);
+        assert_eq!(
+            summary(&serde_json::to_string(&s).unwrap()),
+            "cpu 2% · 40 °C · ram 10% · disk 10% · docker unreachable"
+        );
+        assert_eq!(summary("not json"), "agent answered");
     }
 
     #[test]
