@@ -59,8 +59,8 @@ times are the first bad and first clear readings.
 
 `pios ui` draws the 480 × 320 screens from the agent's API with **tiny-skia** (anti-aliased 2D) and
 **ab_glyph** (TrueType text), using the bundled Inter and JetBrains Mono fonts (SIL OFL, in
-`assets/fonts/`). So far it draws **Home**, to a PNG or a laptop preview window. Output to the panel
-comes later.
+`assets/fonts/`). So far it draws **Home**: on the panel (`--fb`), to a PNG, or in a laptop preview window
+(a mouse click acts as a tap).
 
 ```bash
 pios ui --png home.png                          # one frame from the running agent
@@ -94,8 +94,14 @@ binary and are installed by `pios setup`.
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`; anything else gets 403 |
+| `pios-ui.service` (**installed, not enabled**) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
-`systemd-analyze security` rates the agent 0.8 and the helper 0.7 ("SAFE").
+`systemd-analyze security` rates the agent 0.8, the helper 0.7 and the screen 0.8 ("SAFE").
+
+```bash
+sudo systemctl start pios-ui     # PiOS takes the panel (stops tft-btop)
+sudo systemctl start tft-btop    # back to the old session (stops pios-ui)
+```
 
 ```bash
 # first install, as root: download a release, check it, install

@@ -9,6 +9,7 @@ use std::process::Command;
 
 use crate::error::{Result, err};
 
+/// Installed and enabled at boot.
 pub const UNITS: [(&str, &str); 3] = [
     (
         "pios-agent.service",
@@ -23,6 +24,8 @@ pub const UNITS: [(&str, &str); 3] = [
         include_str!("../deploy/pios-helper.service"),
     ),
 ];
+/// Installed but not enabled: the user decides when PiOS takes the panel.
+pub const UI_UNIT: (&str, &str) = ("pios-ui.service", include_str!("../deploy/pios-ui.service"));
 const SUDOERS: &str = include_str!("../deploy/sudoers-pios-deploy");
 
 const UNIT_DIR: &str = "/etc/systemd/system";
@@ -124,6 +127,22 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
         )?;
         println!("  created user pios");
     }
+    if !user_exists("pios-ui") {
+        run(
+            "useradd",
+            &[
+                "--system",
+                "--user-group",
+                "--no-create-home",
+                "--home-dir",
+                "/nonexistent",
+                "--shell",
+                "/usr/sbin/nologin",
+                "pios-ui",
+            ],
+        )?;
+        println!("  created user pios-ui");
+    }
     if !user_exists("pios-deploy") {
         run(
             "useradd",
@@ -142,7 +161,7 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
     }
 
     let mut units_changed = false;
-    for (name, body) in UNITS {
+    for (name, body) in UNITS.iter().chain([&UI_UNIT]) {
         units_changed |= write_if_changed(&format!("{UNIT_DIR}/{name}"), body, 0o644)?;
     }
 
@@ -182,6 +201,8 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
     run("systemctl", &["try-restart", "pios-helper.service"])?;
     run("systemctl", &["restart", "pios-agent.service"])?;
     println!("  pios-agent restarted");
+    // the screen only restarts if it's already running (it's never started from here)
+    run("systemctl", &["try-restart", "pios-ui.service"])?;
     Ok(())
 }
 
@@ -198,7 +219,7 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
         ],
     );
     let _ = run("systemctl", &["stop", "pios-helper.service"]);
-    for (name, _) in UNITS {
+    for (name, _) in UNITS.iter().chain([&UI_UNIT]) {
         remove(&format!("{UNIT_DIR}/{name}"));
     }
     let _ = run("systemctl", &["daemon-reload"]);
@@ -206,6 +227,10 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
     if user_exists("pios-deploy") {
         let _ = run("userdel", &["--remove", "pios-deploy"]); // also removes its home and key
         println!("  removed user pios-deploy");
+    }
+    if user_exists("pios-ui") {
+        let _ = run("userdel", &["pios-ui"]);
+        println!("  removed user pios-ui");
     }
     remove_dir(crate::update::CACHE);
     if !keep_data {
@@ -281,6 +306,23 @@ mod tests {
             );
         }
         assert!(UNITS[1].1.lines().any(|l| l == "SocketMode=0660"));
+        let ui = UI_UNIT.1;
+        for line in [
+            "User=pios-ui",
+            "Conflicts=tft-btop.service",
+            "MemoryMax=60M",
+            "CPUQuota=10%",
+            "DevicePolicy=closed",
+            "DeviceAllow=/dev/fb0 rw",
+            "PrivateNetwork=yes",
+            "CapabilityBoundingSet=",
+        ] {
+            assert!(ui.lines().any(|l| l == line), "ui unit lacks {line}");
+        }
+        assert!(
+            !ui.contains("[Install]"),
+            "the ui unit must not be enabled at boot by setup"
+        );
         assert!(
             SUDOERS
                 .lines()

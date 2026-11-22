@@ -25,6 +25,7 @@ mod http;
 mod parse;
 mod rules;
 mod setup;
+mod signals;
 mod store;
 mod types;
 mod ui;
@@ -33,7 +34,6 @@ mod update;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -45,32 +45,6 @@ use types::{Snapshot, now_ms};
 const INTERVAL: Duration = Duration::from_secs(5);
 const TREND_EVERY: Duration = Duration::from_secs(60);
 const PRUNE_INCIDENTS_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
-
-static STOP: AtomicBool = AtomicBool::new(false);
-
-extern "C" fn on_signal(_: libc::c_int) {
-    STOP.store(true, Ordering::SeqCst);
-}
-
-fn install_signal_handlers() {
-    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
-    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-    unsafe {
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
-    }
-}
-
-/// Sleeps until `deadline`, waking early on Ctrl+C / SIGTERM.
-fn sleep_until(deadline: Instant) {
-    while !STOP.load(Ordering::SeqCst) {
-        let now = Instant::now();
-        if now >= deadline {
-            return;
-        }
-        std::thread::sleep((deadline - now).min(Duration::from_millis(200)));
-    }
-}
 
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
@@ -174,7 +148,7 @@ fn agent() -> Result<()> {
     let db_path = data_dir.join("pios.db");
     let socket_path = api_socket();
 
-    install_signal_handlers();
+    signals::install();
 
     let mut store = Store::open(&db_path)?;
     let now = now_ms();
@@ -213,9 +187,9 @@ fn agent() -> Result<()> {
     let mut last_prune = Instant::now();
     let mut last_snapshot: Option<Snapshot> = None;
 
-    while !STOP.load(Ordering::SeqCst) {
-        sleep_until(next);
-        if STOP.load(Ordering::SeqCst) {
+    while !signals::stopping() {
+        signals::sleep_until(next);
+        if signals::stopping() {
             break;
         }
         next += INTERVAL;
