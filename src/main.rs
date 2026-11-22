@@ -2,6 +2,7 @@
 //!
 //!   pios agent      run forever: collect every 5 s, 24 h trend + incidents in SQLite, local API
 //!   pios snapshot   collect one snapshot and print it as JSON
+//!   pios ui ...     draw the screens (see `src/ui/mod.rs`; for now a PNG or a laptop preview)
 //!   pios version
 //!
 //! Environment (all optional):
@@ -12,10 +13,12 @@
 mod api;
 mod collect;
 mod error;
+mod http;
 mod parse;
 mod rules;
 mod store;
 mod types;
+mod ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -147,11 +150,19 @@ fn log_err<T>(what: &str, r: Result<T>) {
     }
 }
 
+fn data_dir() -> PathBuf {
+    env_path("PIOS_DATA_DIR").unwrap_or_else(|| PathBuf::from("data"))
+}
+
+fn api_socket() -> PathBuf {
+    env_path("PIOS_SOCKET").unwrap_or_else(|| data_dir().join("pios.sock"))
+}
+
 fn agent() -> Result<()> {
-    let data_dir = env_path("PIOS_DATA_DIR").unwrap_or_else(|| PathBuf::from("data"));
+    let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
     let db_path = data_dir.join("pios.db");
-    let socket_path = env_path("PIOS_SOCKET").unwrap_or_else(|| data_dir.join("pios.sock"));
+    let socket_path = api_socket();
 
     install_signal_handlers();
 
@@ -257,12 +268,16 @@ fn main() -> ExitCode {
     let result = match cmd.as_deref() {
         Some("agent") => agent(),
         Some("snapshot") => snapshot(),
+        Some("ui") => {
+            let rest: Vec<String> = std::env::args().skip(2).collect();
+            ui::run(&rest, &api_socket())
+        }
         Some("version" | "--version") => {
             println!("pios {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("usage: pios <agent|snapshot|version>");
+            eprintln!("usage: pios <agent|snapshot|ui|version>");
             return ExitCode::from(2);
         }
     };
