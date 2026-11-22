@@ -358,6 +358,7 @@ mod tests {
         for line in [
             "User=pios-ui",
             "Conflicts=tft-btop.service",
+            "Environment=PIOS_FB_SWAP_RB=1",
             "MemoryMax=60M",
             "CPUQuota=10%",
             "DevicePolicy=closed",

@@ -18,6 +18,8 @@ Environment=PIOS_SOCKET=/run/pios/pios.sock
 Environment=PIOS_BACKLIGHT=/sys/class/backlight/tft-backlight/brightness
 Environment=PIOS_IDLE_MIN=30
 Environment="PIOS_TOUCH_MATRIX=0 1.1052 -0.0649 1.1297 0 -0.0755"
+# the panel is wired BGR though the driver reports RGB: without this, red shows as purple
+Environment=PIOS_FB_SWAP_RB=1
 # '+' = these two run as root, outside the sandbox: hide the text console on the panel and let
 # pios-ui switch the backlight; on stop, give both back (the console reappears on the panel).
 ExecStartPre=+/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q "frame buffer" "$v/name" && echo 0 > "$v/bind"; done; b=/sys/class/backlight/tft-backlight/brightness; if [ -e "$b" ]; then chgrp pios-ui "$b"; chmod g+w "$b"; echo 1 > "$b"; fi; true'

@@ -201,7 +201,27 @@ impl Engine {
 
     pub fn step(&mut self, s: &Snapshot) -> Vec<Action> {
         let mut actions = Vec::new();
-        for cond in self.conditions(s, &mut actions) {
+        let conds = self.conditions(s, &mut actions);
+        // a host service or website no longer in /etc/pios/checks (or web results gone stale):
+        // nothing would ever clear it, so close it now
+        let gone: Vec<String> = self
+            .states
+            .keys()
+            .filter(|k| k.starts_with("unit:") || k.starts_with("web:"))
+            .filter(|k| !conds.iter().any(|c| &c.key == *k))
+            .cloned()
+            .collect();
+        for key in gone {
+            if let Some(State::Open { .. }) = self.states.remove(&key) {
+                actions.push(Action::Close {
+                    key,
+                    ended_at: s.ts,
+                    snapshot: Box::new(s.clone()),
+                    reason: "no longer checked",
+                });
+            }
+        }
+        for cond in conds {
             self.apply(cond, s, &mut actions);
         }
         actions
@@ -639,6 +659,48 @@ pub mod tests {
         assert_eq!(o.key, "container:redis");
         assert_eq!(o.started_at, 5000);
         assert_eq!(o.peak_value, None);
+    }
+
+    #[test]
+    fn web_check_removed_from_the_file_closes() {
+        use crate::types::{Web, WebCheck};
+        let web = |checks: Vec<WebCheck>| Web {
+            ok: 0,
+            total: checks.len() as u32,
+            checked_at: 0,
+            every_sec: 60,
+            checks,
+        };
+        let bad = WebCheck {
+            host: "logs.example.com".into(),
+            expect: 200,
+            code: None,
+            ms: None,
+            error: Some("no DNS".into()),
+            ok: false,
+            fails: 2,
+        };
+        let mut e = Engine::new();
+        let mut opened = false;
+        for i in 0..8 {
+            let mut s = snap(i * 5000, 1.0);
+            s.web = Some(web(vec![bad.clone()]));
+            opened |= e
+                .step(&s)
+                .iter()
+                .any(|a| matches!(a, Action::Open(o) if o.key == "web:logs.example.com"));
+        }
+        assert!(opened);
+        // the line is removed: the next round has no such check
+        let mut s = snap(50_000, 1.0);
+        s.web = Some(web(vec![]));
+        let a = e.step(&s);
+        assert!(
+            a.iter().any(|a| matches!(a,
+                Action::Close { key, reason: "no longer checked", .. } if key == "web:logs.example.com")),
+            "{a:?}"
+        );
+        assert!(e.open_keys().is_empty());
     }
 
     #[test]

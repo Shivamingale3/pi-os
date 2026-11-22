@@ -104,12 +104,17 @@ impl Framebuffer {
         }
         let u = |b: &[u8], at: usize| u32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
         let (xres, yres, bpp) = (u(&v, 0) as usize, u(&v, 4) as usize, u(&v, 24));
-        let format = Format {
+        let mut format = Format {
             bpp,
             red: (u(&v, 32), u(&v, 36)),
             green: (u(&v, 44), u(&v, 48)),
             blue: (u(&v, 56), u(&v, 60)),
         };
+        // Some SPI panels are wired BGR while the driver reports RGB (the Pebble's does: red
+        // showed as purple, amber as light blue). PIOS_FB_SWAP_RB=1 swaps them back.
+        if std::env::var("PIOS_FB_SWAP_RB").is_ok_and(|v| v == "1") {
+            std::mem::swap(&mut format.red, &mut format.blue);
+        }
         if (xres, yres) != (width, height) || !matches!(bpp, 16 | 24 | 32) {
             return Err(err(format!(
                 "{}: {xres}x{yres} {bpp} bpp, expected {width}x{height} at 16/24/32 bpp",
@@ -162,6 +167,15 @@ impl Framebuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn swapped_red_and_blue() {
+        let mut f = Format::BGR888;
+        std::mem::swap(&mut f.red, &mut f.blue);
+        let mut out = Vec::new();
+        f.convert_row(&[0x11, 0x22, 0x33, 0xFF], &mut out);
+        assert_eq!(out, [0x11, 0x22, 0x33]);
+    }
 
     #[test]
     fn bgr888_puts_blue_first() {

@@ -136,6 +136,11 @@ pub enum Paint {
     RestartIcon(Rgb),
     /// two half-circle arrows chasing each other (Refresh), unlike Restart's single arrow
     RefreshIcon(Rgb),
+    /// a turning three-quarter ring (Refresh while it fetches); `angle` in degrees
+    Spinner {
+        angle: f32,
+        color: Rgb,
+    },
     /// a hold's progress: the left `frac` of the box, tinted, clipped to its rounded corners
     Progress {
         frac: f32,
@@ -466,6 +471,18 @@ pub fn render(t: &Tree, c: &mut Canvas) {
                     (back.0 - nx * 4.5, back.1 - ny * 4.5),
                 ]) {
                     c.stroke(&p, *col, 2.2);
+                }
+            }
+            Paint::Spinner { angle, color } => {
+                let (cx, cy, rad) = (r.x + r.w / 2.0, r.cy(), r.w.min(r.h) / 2.0 - 1.5);
+                let pts: Vec<(f32, f32)> = (0..=27)
+                    .map(|i| {
+                        let a = (angle + i as f32 * 10.0).to_radians();
+                        (cx + rad * a.cos(), cy + rad * a.sin())
+                    })
+                    .collect();
+                if let Some(p) = polyline(&pts) {
+                    c.stroke(&p, *color, 2.4);
                 }
             }
             Paint::RefreshIcon(col) => {

@@ -218,7 +218,10 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             pressed = None;
             if let Some(nav) = nav {
                 app.go(nav);
-                app.update(&o.socket, Instant::now());
+                // Refresh: draw the spinner first; the fetch runs at the top of the next turn
+                if nav != Nav::Refresh {
+                    app.update(&o.socket, Instant::now());
+                }
             }
         }
 
@@ -243,7 +246,7 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
         if let Some((_, until, _)) = pressed {
             wait = wait.min(until.saturating_duration_since(now));
         }
-        if holding.is_some() {
+        if holding.is_some() || app.spinning(now) {
             wait = wait.min(HOLD_FRAME);
         }
         poll_touch(

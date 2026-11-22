@@ -65,6 +65,9 @@ pub const SCREENS: [&str; 11] = [
     "container",
 ];
 
+/// The refresh icon spins at least this long, so a fast fetch is still seen to happen.
+pub const REFRESH_SHOWN: Duration = Duration::from_millis(800);
+
 /// Sparkline length (one point per refresh: Disk I/O, a container's CPU and memory).
 const IO_POINTS: usize = 12;
 /// 24 h graphs are drawn from this many averaged buckets (15 min each).
@@ -95,6 +98,8 @@ pub struct App {
     pub refused: Option<(u64, String)>,
     /// the open Services tab
     pub tab: screens::Tab,
+    /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
+    pub refreshing: Option<Instant>,
     last: HashMap<&'static str, Instant>,
     /// false for built-in samples: never fetch
     pub live: bool,
@@ -174,6 +179,7 @@ impl App {
                 for (k, _) in self.needs() {
                     self.last.remove(k);
                 }
+                self.refreshing = Some(Instant::now());
                 self.screen()
             }
             Nav::Incident(id) => {
@@ -361,6 +367,12 @@ impl App {
         d.services.iter().chain(&d.host).find(|s| key(&s.id) == k)
     }
 
+    /// The refresh icon is spinning (the panel redraws often meanwhile).
+    pub fn spinning(&self, now: Instant) -> bool {
+        self.refreshing
+            .is_some_and(|t| now.saturating_duration_since(t) < REFRESH_SHOWN)
+    }
+
     /// How long until the next fetch is due.
     pub fn next_due(&self, now: Instant) -> Duration {
         self.needs()
@@ -376,6 +388,27 @@ impl App {
 
     /// Lays out the open screen. `at` turns a timestamp into (time, date) text.
     pub fn tree(
+        &self,
+        f: &Fonts,
+        now_ms: i64,
+        time: &str,
+        date: &str,
+        at: &dyn Fn(i64) -> (String, String),
+    ) -> Tree {
+        let mut t = self.screen_tree(f, now_ms, time, date, at);
+        if let Some(start) = self.refreshing.filter(|_| self.spinning(Instant::now())) {
+            let angle = start.elapsed().as_secs_f32() * 450.0 % 360.0;
+            for it in t.items.iter_mut().filter(|i| i.name == "refresh icon") {
+                it.paint = super::layout::Paint::Spinner {
+                    angle,
+                    color: super::theme::INK,
+                };
+            }
+        }
+        t
+    }
+
+    fn screen_tree(
         &self,
         f: &Fonts,
         now_ms: i64,
@@ -468,6 +501,18 @@ mod tests {
         a.go(Nav::Refresh);
         assert_eq!(a.screen(), Screen::Cpu, "refresh stays on the screen");
         assert_eq!(a.next_due(now), Duration::ZERO);
+        // its icon spins (and the screen still passes the spacing check)
+        assert!(a.spinning(Instant::now()));
+        let f = Fonts::load();
+        let t = a.tree(&f, 0, "9:00 AM", "Sun 22 Nov", &crate::ui::utc_at);
+        let icon = t.items.iter().find(|i| i.name == "refresh icon").unwrap();
+        assert!(matches!(
+            icon.paint,
+            crate::ui::layout::Paint::Spinner { .. }
+        ));
+        assert!(crate::ui::layout::check(&t).is_empty());
+        a.refreshing = Some(Instant::now() - REFRESH_SHOWN);
+        assert!(!a.spinning(Instant::now()));
     }
 
     #[test]
