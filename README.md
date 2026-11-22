@@ -113,8 +113,8 @@ off or as by day), **LED ring** (a pattern per state and the brightness) and **F
 **Night face**: inside the night window, after the chosen time without a touch, Home becomes a big
 dim clock with one status line (amber or red when something's wrong); a tap brings Home back. The
 backlight can only be on or off, so the night face is dark pixels, and the screen still turns off
-after the Display timeout. At night the ring glows faintly (or not at all) when all is good;
-problems still show, at low brightness.
+after the Display timeout. At night the ring keeps its patterns by default; *Faint* tops them at
+about 40 %, *Off* darkens it while all is good (problems still show).
 
 **Shutdown screen**: when systemd stops the screen because the whole system is going down
 (`systemctl is-system-running` = stopping), it shows *Shutting down* or *Restarting*, then the

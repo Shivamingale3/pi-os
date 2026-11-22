@@ -168,8 +168,8 @@ pub struct State {
 }
 
 pub const PREVIEW: Duration = Duration::from_secs(6);
-/// "Faint" at night: a steady glow you only see in the dark (about 1.5 % duty)
-pub const NIGHT_FAINT: f32 = 0.15;
+/// "Faint" at night: every pattern topped at this (perceptual; about 13 % duty)
+pub const NIGHT_FAINT: f32 = 0.4;
 const DOWN_BLINK_FOR: f32 = 60.0;
 
 fn bump(x: f32, width: f32) -> f32 {
@@ -212,8 +212,9 @@ pub fn level(s: &State, now: Instant) -> f32 {
         return left.clamp(0.0, 1.0);
     }
     let night = s.night.filter(|n| *n != NightRing::AsDay);
+    // Faint at night: the same patterns, dimmer (never a near-invisible steady dot)
     let max = if night.is_some() {
-        BRIGHTNESS[0].1
+        NIGHT_FAINT.min(BRIGHTNESS[s.settings.brightness.min(2)].1)
     } else {
         BRIGHTNESS[s.settings.brightness.min(2)].1
     };
@@ -235,7 +236,6 @@ pub fn level(s: &State, now: Instant) -> f32 {
     }
     let t = secs(s.since);
     let v = match s.status {
-        Status::Good if night == Some(NightRing::Faint) => return NIGHT_FAINT,
         Status::Good if night == Some(NightRing::Off) => return 0.0,
         Status::Good => pattern_level(Role::Good, s.settings.good, t),
         Status::Attention => pattern_level(Role::Attention, s.settings.attention, t),
@@ -258,11 +258,7 @@ fn animating(s: &State, now: Instant) -> bool {
         Status::Down => s.settings.down,
         Status::Unknown => Pattern::Blink,
     };
-    let resting = s.status == Status::Good
-        && matches!(
-            s.night,
-            Some(super::prefs::NightRing::Faint | super::prefs::NightRing::Off)
-        );
+    let resting = s.status == Status::Good && s.night == Some(super::prefs::NightRing::Off);
     s.shutdown.is_some()
         || s.hold.is_some()
         || s.fired
@@ -431,13 +427,16 @@ mod tests {
         use crate::ui::prefs::NightRing;
         let mut s = st(Status::Good);
         s.night = Some(NightRing::Faint);
-        assert_eq!(at(&s, 3.0), NIGHT_FAINT);
-        assert!(!animating(&s, s.since), "a steady glow needs no redraws");
+        // still breathing, just topped lower
+        assert!((at(&s, 2.0) - NIGHT_FAINT).abs() < 1e-3);
+        assert!(at(&s, 0.0) < at(&s, 1.0));
+        assert!(animating(&s, s.since));
         s.night = Some(NightRing::Off);
         assert_eq!(at(&s, 3.0), 0.0);
-        // problems still show at night, at low brightness
+        assert!(!animating(&s, s.since), "off needs no redraws");
+        // problems still show at night (Off only darkens all-good), dimmed like Faint
         s.status = Status::Down;
-        assert_eq!(at(&s, 0.2), BRIGHTNESS[0].1);
+        assert_eq!(at(&s, 0.2), NIGHT_FAINT);
         s.night = Some(NightRing::AsDay);
         assert_eq!(at(&s, 0.2), BRIGHTNESS[2].1);
         // shutting down: the ring is the share of containers still running
