@@ -15,6 +15,21 @@ pub const TREND_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 pub const INCIDENT_KEEP_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS events (
+    ts     INTEGER NOT NULL,
+    kind   TEXT    NOT NULL,
+    user   TEXT    NOT NULL,
+    src    TEXT    NOT NULL,
+    detail TEXT    NOT NULL,
+    UNIQUE (ts, kind, user, src, detail)
+);
+CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
+
+CREATE TABLE IF NOT EXISTS kv (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS trend (
     ts     INTEGER NOT NULL,
     metric TEXT    NOT NULL,
@@ -171,6 +186,39 @@ impl Store {
     }
 
     /// Folds the WAL back into the main file (on shutdown), so a stopped agent leaves one file.
+    /// Adds events (duplicates ignored); returns how many were new.
+    pub fn insert_events(&self, list: &[crate::events::Event]) -> Result<usize> {
+        let mut n = 0;
+        let mut st = self.conn.prepare_cached(
+            "INSERT OR IGNORE INTO events (ts, kind, user, src, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for e in list {
+            n += st.execute(rusqlite::params![e.ts, e.kind, e.user, e.from, e.detail])?;
+        }
+        Ok(n)
+    }
+
+    pub fn prune_events(&self, now: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM events WHERE ts < ?1", [now - INCIDENT_KEEP_MS])?)
+    }
+
+    pub fn get_kv(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    }
+
+    pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn checkpoint(&self) -> Result<()> {
         self.conn
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -245,6 +293,25 @@ fn summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 }
 
 /// Newest first, without snapshots.
+/// The last 7 days of events, newest first, repeats merged.
+pub fn list_events(conn: &Connection, since: i64) -> Result<Vec<crate::events::Event>> {
+    let mut st = conn.prepare_cached(
+        "SELECT ts, kind, user, src, detail FROM events WHERE ts >= ?1 ORDER BY ts DESC",
+    )?;
+    let rows = st.query_map([since], |r| {
+        Ok(crate::events::Event {
+            ts: r.get(0)?,
+            kind: r.get(1)?,
+            user: r.get(2)?,
+            from: r.get(3)?,
+            detail: r.get(4)?,
+            count: 1,
+        })
+    })?;
+    let list: Vec<crate::events::Event> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(crate::events::merge(list))
+}
+
 pub fn list_incidents(conn: &Connection, since: i64) -> Result<Vec<Value>> {
     let sql = format!(
         "SELECT {SUMMARY_COLS} FROM incidents WHERE started_at >= ?1 OR ended_at IS NULL ORDER BY started_at DESC"

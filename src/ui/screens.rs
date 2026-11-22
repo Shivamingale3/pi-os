@@ -15,6 +15,7 @@ use super::canvas::{Face, Fonts, Style};
 use super::layout::{Marker, Nav, Paint, Rect, Tree};
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
 use crate::details::{CpuDetails, DiskDetails, MemDetails, TempDetails};
+use crate::events::Event;
 use crate::rules::THRESHOLDS;
 use crate::services::{Service, Services};
 use crate::types::Snapshot;
@@ -1210,25 +1211,52 @@ fn when(i: &Incident, now_ms: i64, at: &dyn Fn(i64) -> (String, String)) -> Stri
     }
 }
 
+/// History's two tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistTab {
+    #[default]
+    Incidents,
+    Events,
+}
+
+const HIST_TAB_W: f32 = 96.0;
+
+#[allow(clippy::too_many_arguments)]
 pub fn history(
     f: &Fonts,
     list: Option<&[Incident]>,
+    events: Option<&[Event]>,
+    tab: HistTab,
     page: usize,
     now_ms: i64,
     at: &dyn Fn(i64) -> (String, String),
 ) -> Tree {
     let mut b = B::new(f);
-    let Some(list) = list else {
-        return reading(&mut b, "History");
-    };
-    let n = list.len();
-    b.header(
+    tabs_header(
+        &mut b,
         "History",
-        &format!(
-            "7 days · {n} {}",
-            if n == 1 { "incident" } else { "incidents" }
-        ),
+        &["Incidents", "Events"],
+        HIST_TAB_W,
+        tab as usize,
+        &[],
     );
+    match (tab, list, events) {
+        (HistTab::Incidents, Some(l), _) => incidents_list(&mut b, l, page, now_ms, at),
+        (HistTab::Events, _, Some(e)) => events_list(&mut b, e, page, now_ms, at),
+        _ => empty_note(&mut b, "Reading…"),
+    }
+    b.t
+}
+
+fn incidents_list(
+    b: &mut B,
+    list: &[Incident],
+    page: usize,
+    now_ms: i64,
+    at: &dyn Fn(i64) -> (String, String),
+) {
+    let f = b.f;
+    let n = list.len();
     if list.is_empty() {
         let (c, r) = b.card("empty", Rect::new(M, TOP, WIDTH, 244.0), "", "");
         b.t.add(
@@ -1257,7 +1285,7 @@ pub fn history(
             body(),
             INK3,
         );
-        return b.t;
+        return;
     }
     let pages = n.div_ceil(ROWS_PER_PAGE);
     let page = page.min(pages - 1);
@@ -1334,14 +1362,171 @@ pub fn history(
     }
     // pager (only when there is more than one page)
     if pages > 1 {
-        pager(
-            &mut b,
-            TOP + ROWS_PER_PAGE as f32 * (56.0 + GAP),
-            page,
-            pages,
-        );
+        pager(b, TOP + ROWS_PER_PAGE as f32 * (56.0 + GAP), page, pages);
     }
-    b.t
+}
+
+pub const EVENT_ROWS: usize = 4;
+
+/// (title, rest, marker) of one event row: "SSH" · "admin from 100.64.0.7 · ×3".
+fn event_text(e: &Event) -> (String, String, Marker) {
+    let times = if e.count > 1 {
+        format!(" · ×{}", e.count)
+    } else {
+        String::new()
+    };
+    match e.kind.as_str() {
+        "ssh" => (
+            "SSH".into(),
+            format!("{} from {}{times}", e.user, e.from),
+            Marker::Dot(INK2),
+        ),
+        "ssh_failed" => (
+            "Failed SSH".into(),
+            format!("{} from {}{times}", e.user, e.from),
+            Marker::Square(status_colors(Status::Down).shape),
+        ),
+        "sudo" => (
+            "sudo".into(),
+            format!("{}: {}", e.user, e.detail),
+            Marker::Dot(status_colors(Status::Attention).shape),
+        ),
+        "deploy" if e.detail == "--rollback" => (
+            "Rolled back".into(),
+            "by Jenkins".into(),
+            Marker::Dot(status_colors(Status::Good).shape),
+        ),
+        "deploy" => (
+            format!("Deployed {}", e.detail),
+            "by Jenkins".into(),
+            Marker::Dot(status_colors(Status::Good).shape),
+        ),
+        "boot" => (
+            "Booted".into(),
+            e.detail
+                .parse::<i64>()
+                .map(|ms| format!("was off {}", duration(ms)))
+                .unwrap_or_default(),
+            Marker::Ring(INK2),
+        ),
+        other => (other.into(), e.detail.clone(), Marker::Ring(INK3)),
+    }
+}
+
+/// Pages of at most EVENT_ROWS, never mixing two days (the card label names the day).
+pub fn event_pages<'a>(
+    list: &'a [Event],
+    at: &dyn Fn(i64) -> (String, String),
+) -> Vec<(String, Vec<&'a Event>)> {
+    let mut pages: Vec<(String, Vec<&Event>)> = Vec::new();
+    for e in list {
+        let day = at(e.ts).1;
+        match pages.last_mut() {
+            Some((d, rows)) if *d == day && rows.len() < EVENT_ROWS => rows.push(e),
+            _ => pages.push((day, vec![e])),
+        }
+    }
+    pages
+}
+
+/// "TODAY · 14 SSH · 31 SUDO · 3 DEPLOYS" for today, else the day ("SAT 21 NOV").
+fn day_label(
+    list: &[Event],
+    day: &str,
+    today: &str,
+    at: &dyn Fn(i64) -> (String, String),
+) -> String {
+    if day != today {
+        return day.to_uppercase();
+    }
+    let mut n = [0u32; 4]; // ssh, sudo, deploys, failed
+    for e in list.iter().filter(|e| at(e.ts).1 == day) {
+        match e.kind.as_str() {
+            "ssh" => n[0] += e.count,
+            "sudo" => n[1] += 1,
+            "deploy" => n[2] += 1,
+            "ssh_failed" => n[3] += e.count,
+            _ => {}
+        }
+    }
+    let mut s = "TODAY".to_string();
+    for (k, word) in n.iter().zip(["SSH", "SUDO", "DEPLOY", "FAILED"]) {
+        if *k > 0 {
+            let plural = if word == "DEPLOY" && *k != 1 { "S" } else { "" };
+            s.push_str(&format!(" · {k} {word}{plural}"));
+        }
+    }
+    s
+}
+
+fn events_list(
+    b: &mut B,
+    list: &[Event],
+    page: usize,
+    now_ms: i64,
+    at: &dyn Fn(i64) -> (String, String),
+) {
+    if list.is_empty() {
+        empty_note(
+            b,
+            "No SSH logins, sudo, deploys or boots in the last 7 days",
+        );
+        return;
+    }
+    let pages = event_pages(list, at);
+    let page = page.min(pages.len() - 1);
+    let (day, rows) = &pages[page];
+    let label = day_label(list, day, &at(now_ms).1, at);
+    let (c, r) = b.card("events", Rect::new(M, TOP, WIDTH, 192.0), &label, "");
+    let row_h = 34.0;
+    let time_w = b.f.width(&mono(), "00:00 AM");
+    let title_style = Style::new(Face::SemiBold, size::BODY.0);
+    let mut y = r.y;
+    for e in rows {
+        let (title, rest, mk) = event_text(e);
+        let row =
+            b.t.add(Some(c), "row", Rect::new(r.x, y, r.w, row_h), Paint::None);
+        b.t.add(
+            Some(row),
+            "marker",
+            Rect::new(r.x, y + (row_h - 10.0) / 2.0, 10.0, 10.0),
+            Paint::Marker(mk),
+        );
+        let nx = r.x + 10.0 + GAP;
+        let text_right = r.right() - time_w - GAP;
+        let tw = b.f.width(&title_style, &title).min(text_right - nx);
+        b.text(
+            row,
+            "title",
+            Rect::new(nx, y, tw, row_h),
+            &title,
+            title_style,
+            INK,
+        );
+        let rx = nx + tw + MIN_GAP;
+        if !rest.is_empty() && text_right - rx > 24.0 {
+            b.text(
+                row,
+                "rest",
+                Rect::new(rx, y, text_right - rx, row_h),
+                &format!("· {rest}"),
+                body(),
+                INK3,
+            );
+        }
+        b.text_right(
+            row,
+            "time",
+            Rect::new(r.right() - time_w, y, time_w, row_h),
+            &at(e.ts).0,
+            mono(),
+            INK3,
+        );
+        y += row_h + MIN_GAP;
+    }
+    if pages.len() > 1 {
+        pager(b, theme::H - M - 44.0, page, pages.len());
+    }
 }
 
 /// ‹ 1 / 3 › at `py`, full width; the arrows keep the open screen and change its page.
@@ -1688,9 +1873,17 @@ pub fn tab_problems(d: &Services) -> [bool; 3] {
 pub const TAB_W: f32 = 72.0;
 
 /// Header with the title on the left and the three tabs (44 px touch targets) on the right.
-fn tabs_header(b: &mut B, active: Tab, problems: [bool; 3]) {
-    b.header("Services", "");
-    let tabs_w = 3.0 * TAB_W + 2.0 * GAP;
+fn tabs_header(
+    b: &mut B,
+    title: &str,
+    labels: &[&str],
+    tab_w: f32,
+    active: usize,
+    problems: &[bool],
+) {
+    b.header(title, "");
+    let n = labels.len() as f32;
+    let tabs_w = n * tab_w + (n - 1.0) * GAP;
     let x0 = theme::W - M - 44.0 - GAP - tabs_w; // left of the refresh button
     // keep the title clear of the tabs
     if let Some(t) = b.t.items.iter_mut().find(|i| i.name == "title") {
@@ -1698,12 +1891,13 @@ fn tabs_header(b: &mut B, active: Tab, problems: [bool; 3]) {
     }
     let h = 0; // the header is the first item
     let ls = Style::new(Face::SemiBold, size::BODY.0);
-    for (i, tab) in Tab::ALL.into_iter().enumerate() {
-        let r = Rect::new(x0 + i as f32 * (TAB_W + GAP), M, TAB_W, 44.0);
-        let on = tab == active;
+    for (i, label) in labels.iter().enumerate() {
+        let r = Rect::new(x0 + i as f32 * (tab_w + GAP), M, tab_w, 44.0);
+        let on = i == active;
+        let warn = problems.get(i).copied().unwrap_or(false);
         let it = b.t.add(
             Some(h),
-            tab.label(),
+            *label,
             r,
             Paint::Panel {
                 fill: if on { theme::TRACK } else { theme::SURFACE },
@@ -1713,18 +1907,18 @@ fn tabs_header(b: &mut B, active: Tab, problems: [bool; 3]) {
         );
         b.t.nav(it, Nav::Tab(i as u8));
         b.t.pad(it, 8.0);
-        let lw = b.f.width(&ls, tab.label());
-        let mark = if problems[i] { 10.0 + MIN_GAP } else { 0.0 };
+        let lw = b.f.width(&ls, label);
+        let mark = if warn { 10.0 + MIN_GAP } else { 0.0 };
         let x = r.x + (r.w - lw - mark) / 2.0;
         b.text(
             it,
             "label",
             Rect::new(x, r.y + 8.0, lw, 28.0),
-            tab.label(),
+            label,
             ls,
             if on { INK } else { INK2 },
         );
-        if problems[i] {
+        if warn {
             b.t.add(
                 Some(it),
                 "warn",
@@ -1751,7 +1945,15 @@ pub fn services(
     let Some(d) = d else {
         return reading(&mut b, "Services");
     };
-    tabs_header(&mut b, tab, tab_problems(d));
+    let labels = Tab::ALL.map(Tab::label);
+    tabs_header(
+        &mut b,
+        "Services",
+        &labels,
+        TAB_W,
+        tab as usize,
+        &tab_problems(d),
+    );
     match tab {
         Tab::Apps if !d.reachable => empty_note(&mut b, "Docker not reachable"),
         Tab::Apps if d.services.is_empty() => empty_note(&mut b, "No containers"),

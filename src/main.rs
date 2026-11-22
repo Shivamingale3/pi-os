@@ -25,6 +25,7 @@ mod checks;
 mod collect;
 mod details;
 mod error;
+mod events;
 mod helper;
 mod http;
 mod parse;
@@ -52,6 +53,8 @@ use types::{Snapshot, now_ms};
 const INTERVAL: Duration = Duration::from_secs(5);
 const TREND_EVERY: Duration = Duration::from_secs(60);
 const PRUNE_INCIDENTS_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const EVENTS_EVERY: Duration = Duration::from_secs(60);
+const BOOTS_EVERY: Duration = Duration::from_secs(60 * 60);
 
 fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name)
@@ -149,6 +152,22 @@ fn api_socket() -> PathBuf {
     env_path("PIOS_SOCKET").unwrap_or_else(|| data_dir().join("pios.sock"))
 }
 
+/// New SSH / sudo lines since the saved cursor (and, when due, the boot list) into the store.
+fn poll_events(store: &Store, boots: bool) -> Result<()> {
+    const CURSOR: &str = "journal_cursor";
+    let cursor = store.get_kv(CURSOR);
+    let (list, next) = events::read_journal(cursor.as_deref())?;
+    store.insert_events(&list)?;
+    if let Some(c) = next {
+        store.set_kv(CURSOR, &c)?;
+    }
+    if boots {
+        let list: Vec<events::Event> = events::read_boots()?.into_iter().map(|(_, e)| e).collect();
+        store.insert_events(&list)?;
+    }
+    Ok(())
+}
+
 fn agent() -> Result<()> {
     let data_dir = data_dir();
     std::fs::create_dir_all(&data_dir)?;
@@ -192,6 +211,9 @@ fn agent() -> Result<()> {
     let mut next = Instant::now() + Duration::from_secs(1);
     let mut last_trend: Option<Instant> = None;
     let mut last_prune = Instant::now();
+    let mut last_events: Option<Instant> = None;
+    let mut last_boots = Instant::now();
+    let mut events_err: Option<String> = None;
     let mut last_snapshot: Option<Snapshot> = None;
 
     while !signals::stopping() {
@@ -224,9 +246,27 @@ fn agent() -> Result<()> {
             log_err("trend prune", store.prune_trend(snap.ts));
             log_err("peaks", incidents.flush_peaks(&store));
         }
+        if last_events.is_none_or(|t| t.elapsed() >= EVENTS_EVERY) {
+            let boots_due = last_events.is_none() || last_boots.elapsed() >= BOOTS_EVERY;
+            last_events = Some(Instant::now());
+            if boots_due {
+                last_boots = Instant::now();
+            }
+            if let Err(e) = poll_events(&store, boots_due) {
+                // once per distinct error, not every minute
+                let msg = e.to_string();
+                if events_err.as_deref() != Some(msg.as_str()) {
+                    eprintln!("pios: events: {msg}");
+                    events_err = Some(msg);
+                }
+            } else {
+                events_err = None;
+            }
+        }
         if last_prune.elapsed() >= PRUNE_INCIDENTS_EVERY {
             last_prune = Instant::now();
             log_err("incident prune", store.prune_incidents(snap.ts));
+            log_err("event prune", store.prune_events(snap.ts));
         }
         last_snapshot = Some(snap);
     }

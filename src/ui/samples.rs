@@ -615,7 +615,58 @@ fn worst_services() -> Services {
 pub fn sample_named(sample: &str, screen: &str) -> Option<App> {
     let mut a = sample_app(sample, Screen::parse(screen)?)?;
     a.tab = super::app::tab_for(screen);
+    a.hist_tab = super::app::hist_tab_for(screen);
     Some(a)
+}
+
+fn event(
+    min_ago: i64,
+    kind: &str,
+    user: &str,
+    from: &str,
+    detail: &str,
+    count: u32,
+) -> crate::events::Event {
+    crate::events::Event {
+        ts: NOW_MS - min_ago * MIN,
+        kind: kind.into(),
+        user: user.into(),
+        from: from.into(),
+        detail: detail.into(),
+        count,
+    }
+}
+
+/// A plausible week: logins, sudo, deploys, a boot, a burst of failed logins.
+fn good_events() -> Vec<crate::events::Event> {
+    vec![
+        event(19, "ssh", "admin", "100.64.0.7", "", 3),
+        event(22, "deploy", "pios-deploy", "", "v0.7.3", 1),
+        event(48, "sudo", "admin", "", "systemctl status nginx", 1),
+        event(60, "sudo", "admin", "", "apt upgrade", 1),
+        event(110, "ssh", "admin", "100.64.0.7", "", 1),
+        event(540, "boot", "", "", "2000", 1),
+        event(1500, "ssh_failed", "root", "203.0.113.9", "", 12),
+        event(1600, "boot", "", "", "13000", 1),
+        event(1610, "sudo", "admin", "", "reboot", 1),
+        event(3000, "deploy", "pios-deploy", "", "--rollback", 1),
+    ]
+}
+
+fn worst_events() -> Vec<crate::events::Event> {
+    (0..60)
+        .map(|i| {
+            let kinds = ["ssh", "ssh_failed", "sudo", "deploy", "boot", "other"];
+            event(
+                i * 97,
+                kinds[i as usize % kinds.len()],
+                "a-very-long-user-name-for-testing",
+                "2001:db8:1234:5678:9abc:def0:1234:5678",
+                "/usr/bin/some-very-long-command --with --many --arguments and/a/very/long/path",
+                9999,
+            )
+        })
+        .collect()
 }
 
 /// An app showing `screen` with the named sample (good, attention, down, waiting, worst).
@@ -641,6 +692,7 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
                 snapshots: Snapshots::default(),
             });
             a.incidents = Some(list);
+            a.events = Some(worst_events());
             a.services = Some(worst_services());
             a.svc_cpu = curve(12, 3999.0, 1.0, 0.0, None).into();
             a.svc_mem = curve(12, 9e15, 1e14, 1.0, None).into();
@@ -663,6 +715,7 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             let list = good_incidents();
             a.incident = Some(full(list[2].clone(), &home, true));
             a.incidents = Some(list);
+            a.events = Some(good_events());
             a.services = Some(good_services((name == "down").then_some("cache")));
             a.svc_cpu = vec![1.2, 1.4, 1.1, 2.0, 1.8, 1.5, 1.6, 2.4, 1.9, 1.7, 2.1, 2.0].into();
             a.svc_mem = [140, 141, 141, 142, 143, 143, 144, 145, 145, 146, 146, 146]
@@ -1011,6 +1064,60 @@ mod tests {
             }
         }
         assert!(n > 60, "{n}");
+    }
+
+    #[test]
+    fn events_never_collide() {
+        use crate::ui::screens::HistTab;
+        let f = Fonts::load();
+        let mut n = 0;
+        for base in ["good", "worst"] {
+            let all = sample_app(base, Screen::History).unwrap().events.unwrap();
+            for count in [0, 1, 3, 4, 5, 9, all.len()] {
+                let mut a = sample_app(base, Screen::History).unwrap();
+                a.hist_tab = HistTab::Events;
+                a.events = Some(all[..count.min(all.len())].to_vec());
+                for p in 0..6 {
+                    a.page = p;
+                    let v = layout::check(&tree(&a, &f));
+                    assert!(v.is_empty(), "{base} events n={count} page={p}: {v:#?}");
+                    n += 1;
+                }
+            }
+            let mut a = sample_app(base, Screen::History).unwrap();
+            a.hist_tab = HistTab::Events;
+            a.events = None;
+            assert!(layout::check(&tree(&a, &f)).is_empty());
+        }
+        assert!(n > 50);
+        // a page never mixes two days, and holds at most 4 rows
+        let ev = good_events();
+        let pages = crate::ui::screens::event_pages(&ev, &crate::ui::utc_at);
+        for (day, rows) in &pages {
+            assert!(rows.len() <= crate::ui::screens::EVENT_ROWS);
+            assert!(rows.iter().all(|e| &crate::ui::utc_at(e.ts).1 == day));
+        }
+    }
+
+    #[test]
+    fn history_tabs() {
+        use crate::ui::screens::HistTab;
+        let f = Fonts::load();
+        let tap = |a: &mut App, name: &str| {
+            let t = tree(a, &f);
+            let (x, y) = panel::centre(&t, name);
+            let nav = t.items[panel::hit(&t, x, y).unwrap()].nav.unwrap();
+            a.go(nav);
+        };
+        let mut a = sample_app("good", Screen::Home).unwrap();
+        a.go(Nav::History);
+        assert_eq!(a.hist_tab, HistTab::Incidents);
+        tap(&mut a, "Events");
+        assert_eq!((a.screen(), a.hist_tab), (Screen::History, HistTab::Events));
+        let keys: Vec<_> = a.needs().into_iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&"events") && !keys.contains(&"incidents"));
+        tap(&mut a, "Incidents");
+        assert_eq!(a.hist_tab, HistTab::Incidents);
     }
 
     #[test]

@@ -380,6 +380,7 @@ struct Args {
     sample: Option<String>,
     screen: app::Screen,
     tab: screens::Tab,
+    hist_tab: screens::HistTab,
     check: bool,
     scale: usize,
 }
@@ -393,6 +394,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
         sample: None,
         screen: app::Screen::Home,
         tab: screens::Tab::Apps,
+        hist_tab: screens::HistTab::Incidents,
         check: false,
         scale: 2,
     };
@@ -418,6 +420,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
                     ))
                 })?;
                 a.tab = app::tab_for(&s);
+                a.hist_tab = app::hist_tab_for(&s);
             }
             "--check" => a.check = true,
             "--scale" => {
@@ -491,6 +494,7 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
                     socket,
                 )?;
                 ap.tab = app::tab_for(s);
+                ap.hist_tab = app::hist_tab_for(s);
                 let v = layout::check(&tree_for(&ap, &fonts));
                 println!(
                     "{n} · {s}: {}",
@@ -514,6 +518,8 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
     if let Some(path) = &a.png {
         let mut ap = make_app(a.sample.as_deref(), a.screen, socket)?;
         ap.tab = a.tab;
+        ap.hist_tab = a.hist_tab;
+        ap.hist_tab = a.hist_tab;
         ap.tab = a.tab;
         let c = panel::frame(&tree_for(&ap, &fonts), &fonts, None);
         c.pm.save_png(path)

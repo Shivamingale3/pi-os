@@ -9,6 +9,8 @@ After=pios-helper.socket
 Type=simple
 User=pios
 Group=pios
+# History's Events tab: read (only) the journal's SSH, sudo and boot lines with journalctl
+SupplementaryGroups=systemd-journal
 ExecStart=/usr/local/bin/pios agent
 Environment=PIOS_DATA_DIR=/var/lib/pios
 Environment=PIOS_SOCKET=/run/pios/pios.sock
