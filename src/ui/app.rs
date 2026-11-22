@@ -26,6 +26,10 @@ pub enum Screen {
     Fans,
     Settings,
     Ring,
+    Display,
+    Night,
+    /// the dim clock shown at night when nobody touches the screen
+    NightFace,
 }
 
 impl Screen {
@@ -43,6 +47,9 @@ impl Screen {
             "fans" => Screen::Fans,
             "settings" => Screen::Settings,
             "ring" => Screen::Ring,
+            "display" => Screen::Display,
+            "night" => Screen::Night,
+            "nightface" => Screen::NightFace,
             "container" => Screen::Container(0),
             _ => return None,
         })
@@ -67,7 +74,7 @@ pub fn hist_tab_for(name: &str) -> screens::HistTab {
     }
 }
 
-pub const SCREENS: [&str; 15] = [
+pub const SCREENS: [&str; 18] = [
     "home",
     "cpu",
     "temps",
@@ -83,6 +90,9 @@ pub const SCREENS: [&str; 15] = [
     "fans",
     "settings",
     "ring",
+    "display",
+    "night",
+    "nightface",
 ];
 
 /// The refresh icon spins at least this long, so a fast fetch is still seen to happen.
@@ -125,6 +135,9 @@ pub struct App {
     pub ring: super::ring::Settings,
     pub ring_path: Option<std::path::PathBuf>,
     pub ring_preview: Option<(super::ring::Role, super::ring::Pattern, Instant)>,
+    /// display, clock and night settings, and where they're saved
+    pub prefs: super::prefs::Prefs,
+    pub prefs_path: Option<std::path::PathBuf>,
     /// where Fans' back button goes (Temperatures or Settings)
     fans_from: Option<Screen>,
     /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
@@ -241,6 +254,14 @@ impl App {
                 Screen::Fans
             }
             Nav::Settings => Screen::Settings,
+            Nav::Display => Screen::Display,
+            Nav::Night => Screen::Night,
+            Nav::Pref(c) => {
+                self.prefs.apply(c);
+                self.prefs.save(self.prefs_path.as_deref());
+                super::set_clock24(self.prefs.clock24);
+                self.screen()
+            }
             Nav::Ring => Screen::Ring,
             Nav::RingSet(row, choice) => {
                 use super::ring::{ATTENTION, BRIGHTNESS, DOWN, GOOD, Role};
@@ -271,7 +292,7 @@ impl App {
                 Screen::Incident(_) => Screen::History,
                 Screen::Container(_) => Screen::Services,
                 Screen::Fans => self.fans_from.take().unwrap_or(Screen::Temps),
-                Screen::Ring => Screen::Settings,
+                Screen::Ring | Screen::Display | Screen::Night => Screen::Settings,
                 _ => Screen::Home,
             },
         };
@@ -311,7 +332,8 @@ impl App {
             Screen::Incident(_) => v.push(("incident", s(10))),
             Screen::Services => v.push(("services", s(5))),
             Screen::Fans => v.push(("temps", s(5))),
-            Screen::Settings | Screen::Ring => {}
+            Screen::Settings | Screen::Ring | Screen::Display | Screen::Night => {}
+            Screen::NightFace => {}
             Screen::Container(_) => v.push(("services", s(3))),
         }
         v
@@ -528,7 +550,20 @@ impl App {
                 screens::services(f, self.services.as_ref(), self.tab, self.page, at)
             }
             Screen::Fans => screens::fans(f, self.temps.as_ref()),
-            Screen::Settings => screens::settings(f, &self.ring),
+            Screen::Settings => screens::settings(f, &self.ring, &self.prefs),
+            Screen::Display => screens::display_screen(f, &self.prefs),
+            Screen::Night => screens::night_screen(f, &self.prefs),
+            Screen::NightFace => {
+                let h = Home::build(&self.home, time, date);
+                let temp = self
+                    .home
+                    .snapshot
+                    .as_ref()
+                    .and_then(|s| s.cpu.temp_c)
+                    .map(|t| format!(" · {t:.0} °C"))
+                    .unwrap_or_default();
+                screens::night_face(f, h.status, &format!("{}{temp}", h.headline), time)
+            }
             Screen::Ring => screens::ring_screen(f, &self.ring),
             Screen::Container(_) => {
                 let cpu: Vec<f32> = self.svc_cpu.iter().copied().collect();

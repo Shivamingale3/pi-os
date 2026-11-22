@@ -7,7 +7,7 @@
 //!   pios ui --check ...          print any spacing-rule violation and exit 1 if there is one
 //!
 //! Panel settings (environment): PIOS_TOUCH_MATRIX (libinput calibration, 6 numbers),
-//! PIOS_BACKLIGHT (sysfs brightness file), PIOS_IDLE_MIN (screen off after, default 30).
+//! PIOS_BACKLIGHT (sysfs brightness file). Screen-off and night times are in Settings → Display / Night.
 
 pub mod app;
 pub mod canvas;
@@ -15,6 +15,7 @@ pub mod fb;
 pub mod home;
 pub mod layout;
 pub mod panel;
+pub mod prefs;
 pub mod ring;
 pub mod samples;
 pub mod screens;
@@ -50,6 +51,17 @@ pub fn local_at(ms: i64) -> (String, String) {
     format_tm(tm.tm_hour, tm.tm_min, tm.tm_wday, tm.tm_mday, tm.tm_mon)
 }
 
+/// Minutes since local midnight (the night window).
+pub fn local_minutes() -> u32 {
+    // SAFETY: time() has no preconditions; localtime_r only writes into the struct we pass.
+    let t = unsafe { libc::time(std::ptr::null_mut()) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::localtime_r(&t, &mut tm);
+    }
+    (tm.tm_hour * 60 + tm.tm_min).max(0) as u32
+}
+
 /// The same in UTC (tests: golden images must not depend on the machine's time zone).
 pub fn utc_at(ms: i64) -> (String, String) {
     // SAFETY: gmtime_r only writes into the struct we pass.
@@ -61,6 +73,13 @@ pub fn utc_at(ms: i64) -> (String, String) {
     format_tm(tm.tm_hour, tm.tm_min, tm.tm_wday, tm.tm_mday, tm.tm_mon)
 }
 
+static CLOCK24: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Display setting: 24-hour times everywhere (else 12-hour).
+pub fn set_clock24(on: bool) {
+    CLOCK24.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn format_tm(h: i32, m: i32, wday: i32, mday: i32, mon: i32) -> (String, String) {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [
@@ -68,6 +87,9 @@ fn format_tm(h: i32, m: i32, wday: i32, mday: i32, mon: i32) -> (String, String)
     ];
     let day = DAYS.get(wday as usize).unwrap_or(&"");
     let month = MONTHS.get(mon as usize).unwrap_or(&"");
+    if CLOCK24.load(std::sync::atomic::Ordering::Relaxed) {
+        return (format!("{h:02}:{m:02}"), format!("{day} {mday} {month}"));
+    }
     // 12-hour: 0:05 → "12:05 AM", 13:40 → "1:40 PM"
     let (h12, half) = match h {
         0 => (12, "AM"),
@@ -537,10 +559,6 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
             Ok(m) if !m.trim().is_empty() => touch::Calibration::parse(&m)?,
             _ => touch::Calibration::IDENTITY,
         };
-        let idle_min: u64 = std::env::var("PIOS_IDLE_MIN")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30);
         panel::run(
             panel::Options {
                 fb: fb.clone(),
@@ -549,7 +567,6 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
                 backlight: std::env::var_os("PIOS_BACKLIGHT")
                     .filter(|v| !v.is_empty())
                     .map(PathBuf::from),
-                idle: Duration::from_secs(idle_min.max(1) * 60),
                 socket: socket.to_path_buf(),
                 ring_device: std::env::var("PIOS_RING_DEVICE")
                     .ok()

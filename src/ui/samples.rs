@@ -1170,6 +1170,72 @@ mod tests {
     }
 
     #[test]
+    fn settings_night_and_shutdown_never_collide() {
+        use crate::ui::prefs::{Change, Prefs};
+        let f = Fonts::load();
+        let mut a = sample_app("good", Screen::Display).unwrap();
+        // walk every setting to both ends, checking each screen on the way
+        let mut n = 0;
+        for c in [
+            Change::OffAfter(1),
+            Change::OffAfter(-1),
+            Change::NightAfter(1),
+            Change::NightAfter(-1),
+            Change::NightStart(1),
+            Change::NightEnd(-1),
+        ] {
+            for _ in 0..50 {
+                a.prefs.apply(c);
+                for s in [Screen::Display, Screen::Night, Screen::Settings] {
+                    a.screen = Some(s);
+                    let v = layout::check(&tree(&a, &f));
+                    assert!(v.is_empty(), "{s:?} {:?}: {v:#?}", a.prefs);
+                    n += 1;
+                }
+            }
+        }
+        for c in [
+            Change::Clock24(true),
+            Change::Night(false),
+            Change::NightRing(2),
+            Change::Clock24(false),
+        ] {
+            a.prefs.apply(c);
+            for s in [Screen::Display, Screen::Night, Screen::Settings] {
+                a.screen = Some(s);
+                assert!(layout::check(&tree(&a, &f)).is_empty());
+            }
+        }
+        assert!(n > 500);
+        let _ = Prefs::default();
+        // night face: every status, long headlines, both clocks
+        for base in ["good", "attention", "down", "waiting", "worst"] {
+            let mut a = sample_app(base, Screen::NightFace).unwrap();
+            a.screen = Some(Screen::NightFace);
+            for t in ["12:04 PM", "11:59 PM", "23:59", "0:00"] {
+                let tr = a.tree(&f, NOW_MS, t, "Sun 22 Nov", &crate::ui::utc_at);
+                let v = layout::check(&tr);
+                assert!(v.is_empty(), "{base} night face {t}: {v:#?}");
+                // a tap anywhere opens Home
+                let i = panel::hit(&tr, 240.0, 300.0).unwrap();
+                assert_eq!(tr.items[i].nav, Some(Nav::Home));
+            }
+        }
+        // shutdown: every step
+        for (reboot, left, total) in [
+            (false, 9, 9),
+            (false, 6, 9),
+            (true, 0, 9),
+            (false, 0, 0),
+            (true, 999, 999),
+        ] {
+            let t = crate::ui::screens::shutdown(&f, reboot, "11:59 PM", left, total);
+            let v = layout::check(&t);
+            assert!(v.is_empty(), "shutdown {left}/{total}: {v:#?}");
+        }
+    }
+
+    #[test]
     fn menu_ring_and_fans_navigation() {
         use crate::ui::ring::Pattern;
         let f = Fonts::load();

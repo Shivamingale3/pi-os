@@ -73,6 +73,10 @@ pub enum Nav {
     Ring,
     /// LED ring screen: row (0 good, 1 attention, 2 down, 3 brightness), choice (0–2)
     RingSet(u8, u8),
+    Display,
+    Night,
+    /// one setting changed on the Display or Night screen
+    Pref(super::prefs::Change),
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),
