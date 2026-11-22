@@ -68,7 +68,8 @@ impl Default for Prefs {
             night: true,
             night_start: 23 * 60,
             night_end: 7 * 60,
-            night_ring: NightRing::Faint,
+            // the ring looks the same day and night unless asked otherwise
+            night_ring: NightRing::AsDay,
         }
     }
 }
