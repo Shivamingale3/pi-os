@@ -1,0 +1,4 @@
+# Installed by `pios setup` as /etc/sudoers.d/pios-deploy (0440).
+# The deploy user may run exactly one command as root. `pios update` accepts only a vX.Y.Z tag
+# or --rollback and refuses anything else.
+pios-deploy ALL=(root) NOPASSWD: /usr/local/bin/pios update *

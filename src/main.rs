@@ -3,6 +3,13 @@
 //!   pios agent      run forever: collect every 5 s, 24 h trend + incidents in SQLite, local API
 //!   pios snapshot   collect one snapshot and print it as JSON
 //!   pios ui ...     draw the screens (see `src/ui/mod.rs`; for now a PNG or a laptop preview)
+//!
+//! On the Pi (root):
+//!   pios setup [--deploy-key FILE]   install/refresh users, systemd units, sudoers line, deploy key
+//!   pios update vX.Y.Z | --rollback  install a GitHub release (checksum, health check, auto-rollback)
+//!   pios uninstall [--keep-data]     remove everything `setup` created
+//!   pios helper                      filtered Docker access (started by pios-helper.socket)
+//!   pios deploy-ssh                  forced command of the Jenkins deploy key
 //!   pios version
 //!
 //! Environment (all optional):
@@ -13,12 +20,15 @@
 mod api;
 mod collect;
 mod error;
+mod helper;
 mod http;
 mod parse;
 mod rules;
+mod setup;
 mod store;
 mod types;
 mod ui;
+mod update;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -265,19 +275,37 @@ fn snapshot() -> Result<()> {
 
 fn main() -> ExitCode {
     let cmd = std::env::args().nth(1);
+    let rest: Vec<String> = std::env::args().skip(2).collect();
     let result = match cmd.as_deref() {
         Some("agent") => agent(),
         Some("snapshot") => snapshot(),
-        Some("ui") => {
-            let rest: Vec<String> = std::env::args().skip(2).collect();
-            ui::run(&rest, &api_socket())
-        }
+        Some("ui") => ui::run(&rest, &api_socket()),
+        Some("helper") => helper::run(docker_socket()),
+        Some("setup") => match rest.as_slice() {
+            [] => setup::setup(None),
+            [flag, file] if flag == "--deploy-key" => {
+                setup::setup(Some(std::path::Path::new(file)))
+            }
+            _ => Err(error::err("usage: pios setup [--deploy-key FILE]")),
+        },
+        Some("uninstall") => match rest.as_slice() {
+            [] => setup::uninstall(false),
+            [flag] if flag == "--keep-data" => setup::uninstall(true),
+            _ => Err(error::err("usage: pios uninstall [--keep-data]")),
+        },
+        Some("update") => match rest.as_slice() {
+            [arg] => update::update(arg),
+            _ => Err(error::err("usage: pios update vX.Y.Z | --rollback")),
+        },
+        Some("deploy-ssh") => update::deploy_ssh(),
         Some("version" | "--version") => {
             println!("pios {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
         _ => {
-            eprintln!("usage: pios <agent|snapshot|ui|version>");
+            eprintln!(
+                "usage: pios <agent|snapshot|ui|version|setup|update|uninstall|helper|deploy-ssh>"
+            );
             return ExitCode::from(2);
         }
     };

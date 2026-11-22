@@ -1,0 +1,12 @@
+# The only way PiOS reaches Docker. Only the pios group can connect.
+[Unit]
+Description=PiOS helper socket (filtered Docker access)
+
+[Socket]
+ListenStream=/run/pios-helper.sock
+SocketUser=root
+SocketGroup=pios
+SocketMode=0660
+
+[Install]
+WantedBy=sockets.target

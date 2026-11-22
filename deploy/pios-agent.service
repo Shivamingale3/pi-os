@@ -1,0 +1,61 @@
+# PiOS agent: collects every 5 s, keeps the 24 h trend and incidents, serves the local API.
+# Installed by `pios setup`. Unprivileged, no network, capped so it can never slow the server down.
+[Unit]
+Description=PiOS agent (monitoring core)
+Wants=pios-helper.socket
+After=pios-helper.socket
+
+[Service]
+Type=simple
+User=pios
+Group=pios
+ExecStart=/usr/local/bin/pios agent
+Environment=PIOS_DATA_DIR=/var/lib/pios
+Environment=PIOS_SOCKET=/run/pios/pios.sock
+Environment=PIOS_DOCKER_SOCKET=/run/pios-helper.sock
+Restart=on-failure
+RestartSec=5
+
+StateDirectory=pios
+StateDirectoryMode=0750
+RuntimeDirectory=pios
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# Resources: low priority, idle IO, hard caps.
+Nice=10
+IOSchedulingClass=idle
+CPUQuota=15%
+MemoryMax=80M
+TasksMax=16
+
+# Sandbox: read-only system, no home, no network, no privileges.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+IPAddressDeny=any
+RemoveIPC=yes
+KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target
