@@ -161,9 +161,15 @@ pub struct State {
     pub fired: Option<Instant>,
     /// a pattern chosen on the LED ring screen plays for PREVIEW
     pub preview: Option<(Role, Pattern, Instant)>,
+    /// inside the night window: how All good shows (problems still show, at low brightness)
+    pub night: Option<super::prefs::NightRing>,
+    /// shutting down: the share of containers still running (the ring fades with it)
+    pub shutdown: Option<f32>,
 }
 
 pub const PREVIEW: Duration = Duration::from_secs(6);
+/// "Faint" at night: a steady glow you only see in the dark (about 1.5 % duty)
+pub const NIGHT_FAINT: f32 = 0.15;
 const DOWN_BLINK_FOR: f32 = 60.0;
 
 fn bump(x: f32, width: f32) -> f32 {
@@ -200,7 +206,16 @@ pub fn pattern_level(role: Role, p: Pattern, t: f32) -> f32 {
 
 /// The ring's brightness (0–1, perceptual) at `now`.
 pub fn level(s: &State, now: Instant) -> f32 {
-    let max = BRIGHTNESS[s.settings.brightness.min(2)].1;
+    use super::prefs::NightRing;
+    if let Some(left) = s.shutdown {
+        return left.clamp(0.0, 1.0);
+    }
+    let night = s.night.filter(|n| *n != NightRing::AsDay);
+    let max = if night.is_some() {
+        BRIGHTNESS[0].1
+    } else {
+        BRIGHTNESS[s.settings.brightness.min(2)].1
+    };
     let secs = |t: Instant| now.saturating_duration_since(t).as_secs_f32();
     // two flashes when a hold fires (0.6 s)
     if let Some(f) = s.fired
@@ -219,6 +234,8 @@ pub fn level(s: &State, now: Instant) -> f32 {
     }
     let t = secs(s.since);
     let v = match s.status {
+        Status::Good if night == Some(NightRing::Faint) => return NIGHT_FAINT,
+        Status::Good if night == Some(NightRing::Off) => return 0.0,
         Status::Good => pattern_level(Role::Good, s.settings.good, t),
         Status::Attention => pattern_level(Role::Attention, s.settings.attention, t),
         Status::Down => match s.settings.down {
@@ -240,12 +257,18 @@ fn animating(s: &State, now: Instant) -> bool {
         Status::Down => s.settings.down,
         Status::Unknown => Pattern::Blink,
     };
-    s.hold.is_some()
+    let resting = s.status == Status::Good
+        && matches!(
+            s.night,
+            Some(super::prefs::NightRing::Faint | super::prefs::NightRing::Off)
+        );
+    s.shutdown.is_some()
+        || s.hold.is_some()
         || s.fired
             .is_some_and(|f| now.saturating_duration_since(f) < Duration::from_secs(1))
         || s.preview
             .is_some_and(|(_, _, at)| now.saturating_duration_since(at) < PREVIEW)
-        || !matches!(p, Pattern::Steady | Pattern::Off)
+        || (!resting && !matches!(p, Pattern::Steady | Pattern::Off))
 }
 
 pub type Shared = Arc<Mutex<State>>;
@@ -336,6 +359,8 @@ mod tests {
             hold: None,
             fired: None,
             preview: None,
+            night: None,
+            shutdown: None,
         }
     }
 
@@ -391,6 +416,25 @@ mod tests {
         s.settings.good = Pattern::Steady;
         assert!(!animating(&s, s.since));
         assert!(animating(&st(Status::Unknown), Instant::now()));
+    }
+
+    #[test]
+    fn night_and_shutdown() {
+        use crate::ui::prefs::NightRing;
+        let mut s = st(Status::Good);
+        s.night = Some(NightRing::Faint);
+        assert_eq!(at(&s, 3.0), NIGHT_FAINT);
+        assert!(!animating(&s, s.since), "a steady glow needs no redraws");
+        s.night = Some(NightRing::Off);
+        assert_eq!(at(&s, 3.0), 0.0);
+        // problems still show at night, at low brightness
+        s.status = Status::Down;
+        assert_eq!(at(&s, 0.2), BRIGHTNESS[0].1);
+        s.night = Some(NightRing::AsDay);
+        assert_eq!(at(&s, 0.2), BRIGHTNESS[1].1);
+        // shutting down: the ring is the share of containers still running
+        s.shutdown = Some(0.25);
+        assert_eq!(at(&s, 0.2), 0.25);
     }
 
     #[test]

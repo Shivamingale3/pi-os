@@ -105,6 +105,22 @@ The **menu** button on Home opens Settings: the **LED ring** screen chooses the 
 state (all good: breathe · steady · off; attention: pulse · blink · steady; down: blink · pulse ·
 steady) and its brightness; a tap saves it and plays it on the ring for 6 s.
 
+**Settings** (menu on Home) holds everything adjustable, saved at once in `/var/lib/pios-ui/`:
+**Display** (screen off after 1 min … 1 hour or never; night face after 1–30 min; 12- or 24-hour
+clock), **Night** (night face on/off, start and end in half-hour steps, the ring at night: faint,
+off or as by day), **LED ring** (a pattern per state and the brightness) and **Fans**.
+
+**Night face**: inside the night window, after the chosen time without a touch, Home becomes a big
+dim clock with one status line (amber or red when something's wrong); a tap brings Home back. The
+backlight can only be on or off, so the night face is dark pixels, and the screen still turns off
+after the Display timeout. At night the ring glows faintly (or not at all) when all is good;
+problems still show, at low brightness.
+
+**Shutdown screen**: when systemd stops the screen because the whole system is going down
+(`systemctl is-system-running` = stopping), it shows *Shutting down* or *Restarting*, then the
+containers stopping one by one (their cgroups), for up to 45 s; the ring fades with them and goes
+dark when PiOS is done. The last frame stays on the panel until power-off.
+
 **LED ring**: the button's white ring says what Home says, by rhythm (breathing, a double pulse,
 a minute of blinking then the pulse; rising ramps while it starts; it fills with a Restart hold and
 flashes twice when it fires). A thread in `pios ui` drives the PWM, writing only when the level

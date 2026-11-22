@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::app::App;
+use super::app::{App, Screen};
 use super::canvas::{Canvas, Fonts, rounded};
 use super::fb::Framebuffer;
 use super::layout::{self, Nav, Paint, Tree};
@@ -96,7 +96,6 @@ pub struct Options {
     pub touch: Option<PathBuf>,
     pub calibration: Calibration,
     pub backlight: Option<PathBuf>,
-    pub idle: Duration,
     pub socket: PathBuf,
     /// the LED ring's pwmchip (by its `device`) and channel; None = no ring
     pub ring_device: Option<String>,
@@ -148,6 +147,9 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     let mut app = App::live();
     app.ring_path = o.state_dir.as_ref().map(|d| d.join("ring.conf"));
     app.ring = super::ring::Settings::load(app.ring_path.as_deref());
+    app.prefs_path = o.state_dir.as_ref().map(|d| d.join("settings.conf"));
+    app.prefs = super::prefs::Prefs::load(app.prefs_path.as_deref());
+    super::set_clock24(app.prefs.clock24);
     let ring_state: super::ring::Shared =
         std::sync::Arc::new(std::sync::Mutex::new(super::ring::State {
             status: theme::Status::Unknown,
@@ -156,6 +158,8 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             hold: None,
             fired: None,
             preview: None,
+            night: None,
+            shutdown: None,
         }));
     super::ring::spawn(o.ring_device.clone(), o.ring_channel, ring_state.clone());
     let mut fired: Option<Instant> = None;
@@ -223,6 +227,7 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             app.act(h.nav, &o.socket, now);
         }
 
+        let night = app.prefs.is_night(super::local_minutes());
         // the ring says what Home says (also while the screen is dark)
         {
             let status = super::home::Home::build(&app.home, "", "").status;
@@ -235,9 +240,25 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             r.hold = app.holding;
             r.fired = fired;
             r.preview = app.ring_preview;
+            r.night = night.then_some(app.prefs.night_ring);
         }
 
-        if !dark && now - last_touch >= o.idle {
+        // at night, after a while without a touch, the dim clock; a tap brings Home back
+        let screen = app.screen();
+        if !dark
+            && night
+            && screen != Screen::NightFace
+            && now - last_touch >= app.prefs.night_after()
+        {
+            app.go(Nav::Home);
+            app.screen = Some(Screen::NightFace);
+            pressed = None;
+            holding = None;
+        } else if screen == Screen::NightFace && !night {
+            app.go(Nav::Home);
+        }
+
+        if !dark && app.prefs.off_after().is_some_and(|d| now - last_touch >= d) {
             dark = true;
             light.set(false);
             app.go(Nav::Home);
@@ -288,9 +309,78 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             wait.max(Duration::from_millis(10)),
         );
     }
+    // stopped because the whole system is going down: say so until the containers are gone
+    if let Some(reboot) = going_down() {
+        eprintln!(
+            "pios ui: the system is {}",
+            if reboot { "rebooting" } else { "shutting down" }
+        );
+        light.set(true);
+        fb.invalidate();
+        let started = super::local_now().0;
+        let total = running_containers();
+        let until = Instant::now() + SHUTDOWN_SHOWN;
+        loop {
+            let left = running_containers().min(total);
+            ring_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .shutdown = Some(if total == 0 {
+                0.0
+            } else {
+                left as f32 / total as f32
+            });
+            let tree = super::screens::shutdown(fonts, reboot, &started, left, total);
+            fb.present(frame(&tree, fonts, None).pm.data())?;
+            if left == 0 || Instant::now() >= until {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        // the last frame stays on the panel; ExecStopPost turns the ring off
+        return Ok(());
+    }
     eprintln!("pios ui: stopping");
     light.set(true);
     Ok(())
+}
+
+/// How long the shutdown screen waits for containers (the unit allows 60 s to stop).
+const SHUTDOWN_SHOWN: Duration = Duration::from_secs(45);
+
+/// Some(true) rebooting, Some(false) powering off, None: only this service is stopping.
+fn going_down() -> Option<bool> {
+    let out = |args: &[&str]| {
+        std::process::Command::new("systemctl")
+            .args(args)
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    if out(&["is-system-running"])?.trim() != "stopping" {
+        return None;
+    }
+    let jobs = out(&["list-jobs", "--no-legend", "--no-pager"]).unwrap_or_default();
+    Some(jobs.contains("reboot.target") || jobs.contains("kexec.target"))
+}
+
+/// Containers still running: their cgroups (docker-ID.scope) that still hold processes.
+fn running_containers() -> usize {
+    std::fs::read_dir("/sys/fs/cgroup/system.slice")
+        .map(|d| {
+            d.flatten()
+                .filter(|e| {
+                    let n = e.file_name();
+                    let n = n.to_string_lossy();
+                    n.starts_with("docker-") && n.ends_with(".scope")
+                })
+                .filter(|e| {
+                    std::fs::read_to_string(e.path().join("cgroup.events"))
+                        .is_ok_and(|t| crate::checks::populated(&t))
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }
 
 /// For tests and `--check`: where a tap on each touch target lands.

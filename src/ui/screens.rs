@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use super::canvas::{Face, Fonts, Style};
 use super::layout::{Marker, Nav, Paint, Rect, Tree};
+use super::prefs::{self, Prefs};
 use super::ring;
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
 use crate::details::{CaseFan, CpuDetails, DiskDetails, MemDetails, TempDetails};
@@ -2793,7 +2794,7 @@ pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
 
 // ---------------- Settings ----------------
 
-pub fn settings(f: &Fonts, ring: &ring::Settings) -> Tree {
+pub fn settings(f: &Fonts, ring: &ring::Settings, prefs: &Prefs) -> Tree {
     let mut b = B::new(f);
     b.header("Settings", "");
     let rows = [
@@ -2807,6 +2808,28 @@ pub fn settings(f: &Fonts, ring: &ring::Settings) -> Tree {
                 ring::BRIGHTNESS[ring.brightness.min(2)].0
             ),
             Nav::Ring,
+        ),
+        (
+            "Display",
+            format!(
+                "off after {} · {}",
+                prefs.off_label().to_lowercase(),
+                if prefs.clock24 { "24-hour" } else { "12-hour" }
+            ),
+            Nav::Display,
+        ),
+        (
+            "Night",
+            if prefs.night {
+                format!(
+                    "{} – {}",
+                    prefs::clock(prefs.night_start, prefs.clock24),
+                    prefs::clock(prefs.night_end, prefs.clock24)
+                )
+            } else {
+                "off".into()
+            },
+            Nav::Night,
         ),
         ("Fans", "case fan and Active Cooler".to_string(), Nav::Fans),
     ];
@@ -2854,98 +2877,449 @@ pub fn settings(f: &Fonts, ring: &ring::Settings) -> Tree {
     b.t
 }
 
+const ROW_LABEL_W: f32 = 136.0;
+
+/// A settings row: a label, then 2–3 choices (44 px touch targets); the chosen one is outlined.
+fn choice_row(
+    b: &mut B,
+    y: f32,
+    label: &str,
+    opts: &[&str],
+    on: usize,
+    nav: &dyn Fn(usize) -> Nav,
+) {
+    let row =
+        b.t.add(None, label, Rect::new(M, y, WIDTH, 44.0), Paint::None);
+    b.text(
+        row,
+        "label",
+        Rect::new(M, y, ROW_LABEL_W, 44.0),
+        label,
+        body(),
+        INK2,
+    );
+    let n = opts.len() as f32;
+    let opt_w = (WIDTH - ROW_LABEL_W - n * GAP) / n;
+    let sel_style = Style::new(Face::SemiBold, size::BODY.0);
+    for (oi, opt) in opts.iter().enumerate() {
+        let r = Rect::new(
+            M + ROW_LABEL_W + GAP + oi as f32 * (opt_w + GAP),
+            y,
+            opt_w,
+            44.0,
+        );
+        let sel = oi == on;
+        let it = b.t.add(
+            Some(row),
+            *opt,
+            r,
+            Paint::Panel {
+                fill: if sel { theme::TRACK } else { theme::SURFACE },
+                radius: theme::RADIUS_TILE,
+                border: sel.then_some(INK2),
+            },
+        );
+        b.t.nav(it, nav(oi));
+        b.t.pad(it, 8.0);
+        let st = if sel { sel_style } else { body() };
+        let w = b.f.width(&st, opt).min(r.w - 16.0);
+        b.text(
+            it,
+            "label",
+            Rect::new(r.x + (r.w - w) / 2.0, r.y + 8.0, w, 28.0),
+            opt,
+            st,
+            if sel { INK } else { INK2 },
+        );
+    }
+}
+
+/// A settings row: a label, then − value + (a side without a step left is greyed and inert).
+fn stepper_row(b: &mut B, y: f32, label: &str, value: &str, minus: Option<Nav>, plus: Option<Nav>) {
+    let row =
+        b.t.add(None, label, Rect::new(M, y, WIDTH, 44.0), Paint::None);
+    b.text(
+        row,
+        "label",
+        Rect::new(M, y, ROW_LABEL_W, 44.0),
+        label,
+        body(),
+        INK2,
+    );
+    let sign = Style::new(Face::SemiBold, 20.0);
+    let x0 = M + ROW_LABEL_W + GAP;
+    for (name, text, x, nav) in [
+        ("minus", "−", x0, minus),
+        ("plus", "+", theme::W - M - 44.0, plus),
+    ] {
+        let r = Rect::new(x, y, 44.0, 44.0);
+        let it = b.t.add(
+            Some(row),
+            name,
+            r,
+            Paint::Panel {
+                fill: theme::SURFACE,
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        if let Some(n) = nav {
+            b.t.nav(it, n);
+        }
+        b.t.pad(it, 8.0);
+        let w = b.f.width(&sign, text);
+        b.text(
+            it,
+            "sign",
+            Rect::new(r.x + (r.w - w) / 2.0, r.y + 8.0, w, 28.0),
+            text,
+            sign,
+            if nav.is_some() { INK } else { theme::MUTED },
+        );
+    }
+    let vs = Style::new(Face::SemiBold, size::BODY.0);
+    let (vx, vr) = (x0 + 44.0 + GAP, theme::W - M - 44.0 - GAP);
+    let w = b.f.width(&vs, value).min(vr - vx);
+    b.text(
+        row,
+        "value",
+        Rect::new(vx + (vr - vx - w) / 2.0, y, w, 44.0),
+        value,
+        vs,
+        INK,
+    );
+}
+
+fn settings_note(b: &mut B, y: f32, text: &str) {
+    let n =
+        b.t.add(None, "hint", Rect::new(M, y, WIDTH, 20.0), Paint::None);
+    let w = b.f.width(&small(), text).min(WIDTH);
+    b.text(
+        n,
+        "text",
+        Rect::new(M + (WIDTH - w) / 2.0, y, w, 20.0),
+        text,
+        small(),
+        INK3,
+    );
+}
+
+fn row_y(i: usize) -> f32 {
+    TOP + i as f32 * (44.0 + GAP)
+}
+
 /// The LED ring screen: one row per state, three choices each; tapping saves and previews.
 pub fn ring_screen(f: &Fonts, ring: &ring::Settings) -> Tree {
     let mut b = B::new(f);
     b.header("LED ring", "");
-    let rows: [(&str, Vec<&str>, usize); 4] = [
-        (
-            "All good",
-            ring::GOOD.iter().map(|p| p.label()).collect(),
-            ring::GOOD.iter().position(|p| *p == ring.good).unwrap_or(0),
-        ),
-        (
-            "Needs attention",
-            ring::ATTENTION.iter().map(|p| p.label()).collect(),
-            ring::ATTENTION
-                .iter()
-                .position(|p| *p == ring.attention)
-                .unwrap_or(0),
-        ),
-        (
-            "Something down",
-            ring::DOWN.iter().map(|p| p.label()).collect(),
-            ring::DOWN.iter().position(|p| *p == ring.down).unwrap_or(0),
-        ),
-        (
-            "Brightness",
-            ring::BRIGHTNESS.iter().map(|(n, _)| *n).collect(),
-            ring.brightness.min(2),
-        ),
-    ];
-    let label_w = 136.0;
-    let opt_w = (WIDTH - label_w - 3.0 * GAP) / 3.0;
-    let sel_style = Style::new(Face::SemiBold, size::BODY.0);
-    for (ri, (label, opts, on)) in rows.into_iter().enumerate() {
-        let y = TOP + ri as f32 * (44.0 + GAP);
-        let row =
-            b.t.add(None, label, Rect::new(M, y, WIDTH, 44.0), Paint::None);
-        b.text(
-            row,
-            "label",
-            Rect::new(M, y, label_w, 44.0),
-            label,
-            body(),
-            INK2,
-        );
-        for (oi, opt) in opts.into_iter().enumerate() {
-            let r = Rect::new(
-                M + label_w + GAP + oi as f32 * (opt_w + GAP),
-                y,
-                opt_w,
-                44.0,
-            );
-            let sel = oi == on;
-            let it = b.t.add(
-                Some(row),
-                opt,
-                r,
-                Paint::Panel {
-                    fill: if sel { theme::TRACK } else { theme::SURFACE },
-                    radius: theme::RADIUS_TILE,
-                    border: sel.then_some(INK2),
-                },
-            );
-            b.t.nav(it, Nav::RingSet(ri as u8, oi as u8));
-            b.t.pad(it, 8.0);
-            let st = if sel { sel_style } else { body() };
-            let w = b.f.width(&st, opt).min(r.w - 16.0);
-            b.text(
-                it,
-                "label",
-                Rect::new(r.x + (r.w - w) / 2.0, r.y + 8.0, w, 28.0),
-                opt,
-                st,
-                if sel { INK } else { INK2 },
-            );
-        }
-    }
-    let note = "Tap a pattern to see it on the ring for 6 s · saved at once";
-    let nw = b.f.width(&small(), note).min(WIDTH);
-    let n = b.t.add(
+    let labels = |l: &[ring::Pattern]| l.iter().map(|p| p.label()).collect::<Vec<_>>();
+    let pos = |l: &[ring::Pattern], p: ring::Pattern| l.iter().position(|x| *x == p).unwrap_or(0);
+    choice_row(
+        &mut b,
+        row_y(0),
+        "All good",
+        &labels(&ring::GOOD),
+        pos(&ring::GOOD, ring.good),
+        &|i| Nav::RingSet(0, i as u8),
+    );
+    choice_row(
+        &mut b,
+        row_y(1),
+        "Needs attention",
+        &labels(&ring::ATTENTION),
+        pos(&ring::ATTENTION, ring.attention),
+        &|i| Nav::RingSet(1, i as u8),
+    );
+    choice_row(
+        &mut b,
+        row_y(2),
+        "Something down",
+        &labels(&ring::DOWN),
+        pos(&ring::DOWN, ring.down),
+        &|i| Nav::RingSet(2, i as u8),
+    );
+    let br: Vec<&str> = ring::BRIGHTNESS.iter().map(|(n, _)| *n).collect();
+    choice_row(
+        &mut b,
+        row_y(3),
+        "Brightness",
+        &br,
+        ring.brightness.min(2),
+        &|i| Nav::RingSet(3, i as u8),
+    );
+    settings_note(
+        &mut b,
+        row_y(4),
+        "Tap a pattern to see it on the ring for 6 s · saved at once",
+    );
+    b.t
+}
+
+pub fn display_screen(f: &Fonts, p: &Prefs) -> Tree {
+    use prefs::{Change, NIGHT_AFTER, OFF_AFTER};
+    let mut b = B::new(f);
+    b.header("Display", "");
+    let step = |i: usize, len: usize, d: i8, c: fn(i8) -> Change| {
+        let ok = if d < 0 { i > 0 } else { i + 1 < len };
+        ok.then(|| Nav::Pref(c(d)))
+    };
+    stepper_row(
+        &mut b,
+        row_y(0),
+        "Screen off after",
+        &p.off_label(),
+        step(p.off_after, OFF_AFTER.len(), -1, Change::OffAfter),
+        step(p.off_after, OFF_AFTER.len(), 1, Change::OffAfter),
+    );
+    stepper_row(
+        &mut b,
+        row_y(1),
+        "Night face after",
+        &p.night_after_label(),
+        step(p.night_after, NIGHT_AFTER.len(), -1, Change::NightAfter),
+        step(p.night_after, NIGHT_AFTER.len(), 1, Change::NightAfter),
+    );
+    choice_row(
+        &mut b,
+        row_y(2),
+        "Clock",
+        &["12-hour", "24-hour"],
+        p.clock24 as usize,
+        &|i| Nav::Pref(Change::Clock24(i == 1)),
+    );
+    settings_note(&mut b, row_y(3), "A touch wakes the screen · saved at once");
+    b.t
+}
+
+pub fn night_screen(f: &Fonts, p: &Prefs) -> Tree {
+    use prefs::{Change, NightRing, clock};
+    let mut b = B::new(f);
+    b.header("Night", "");
+    choice_row(
+        &mut b,
+        row_y(0),
+        "Night face",
+        &["On", "Off"],
+        (!p.night) as usize,
+        &|i| Nav::Pref(Change::Night(i == 0)),
+    );
+    stepper_row(
+        &mut b,
+        row_y(1),
+        "Starts",
+        &clock(p.night_start, p.clock24),
+        Some(Nav::Pref(Change::NightStart(-1))),
+        Some(Nav::Pref(Change::NightStart(1))),
+    );
+    stepper_row(
+        &mut b,
+        row_y(2),
+        "Ends",
+        &clock(p.night_end, p.clock24),
+        Some(Nav::Pref(Change::NightEnd(-1))),
+        Some(Nav::Pref(Change::NightEnd(1))),
+    );
+    let labels: Vec<&str> = NightRing::ALL.iter().map(|r| r.label()).collect();
+    let on = NightRing::ALL
+        .iter()
+        .position(|r| *r == p.night_ring)
+        .unwrap_or(0);
+    choice_row(&mut b, row_y(3), "Ring at night", &labels, on, &|i| {
+        Nav::Pref(Change::NightRing(i as u8))
+    });
+    settings_note(
+        &mut b,
+        row_y(4),
+        "At night Home becomes a dim clock · problems still show on the ring",
+    );
+    b.t
+}
+
+/// The night face: a big dim clock and one status line; a tap anywhere opens Home.
+pub fn night_face(f: &Fonts, status: Status, line: &str, time: &str) -> Tree {
+    let mut b = B::new(f);
+    let area = Rect::new(M, M, WIDTH, theme::H - 2.0 * M);
+    let root = b.t.add(
         None,
-        "hint",
-        Rect::new(M, TOP + 4.0 * 52.0 + GAP, WIDTH, 20.0),
-        Paint::None,
+        "night",
+        area,
+        Paint::Panel {
+            fill: theme::GROUND,
+            radius: 0.0,
+            border: None,
+        },
+    );
+    b.t.nav(root, Nav::Home);
+    // "12:42 AM" → the digits big, the half of the day small beside them
+    let (digits, half) = time.split_once(' ').unwrap_or((time, ""));
+    let big = Style::new(Face::Regular, 112.0).spacing(-2.0);
+    let hs = Style::new(Face::Regular, size::TITLE.0);
+    let (dw, hw) = (
+        b.f.width(&big, digits),
+        if half.is_empty() {
+            0.0
+        } else {
+            b.f.width(&hs, half) + GAP
+        },
+    );
+    let x = M + (WIDTH - dw - hw) / 2.0;
+    let face = 0x55595D;
+    b.text(
+        root,
+        "clock",
+        Rect::new(x, 60.0, dw, 128.0),
+        digits,
+        big,
+        face,
+    );
+    if !half.is_empty() {
+        b.text(
+            root,
+            "half",
+            Rect::new(x + dw + GAP, 150.0, hw - GAP, 22.0),
+            half,
+            hs,
+            face,
+        );
+    }
+    let ls = Style::new(Face::Regular, size::TITLE.0);
+    let lw = b.f.width(&ls, line).min(WIDTH - 10.0 - GAP);
+    let lx = M + (WIDTH - lw - 10.0 - GAP) / 2.0;
+    let mk = match status {
+        Status::Good => Marker::Dot(0x2F6E57),
+        Status::Attention => Marker::Triangle(status_colors(status).shape),
+        Status::Down => Marker::Square(status_colors(status).shape),
+        Status::Unknown => Marker::Ring(INK3),
+    };
+    b.t.add(
+        Some(root),
+        "marker",
+        Rect::new(lx, 210.0 + 6.0, 10.0, 10.0),
+        Paint::Marker(mk),
+    );
+    let lc = if status == Status::Good {
+        0x6B7075
+    } else {
+        status_colors(status).text
+    };
+    b.text(
+        root,
+        "status",
+        Rect::new(lx + 10.0 + GAP, 210.0, lw, 22.0),
+        line,
+        ls,
+        lc,
+    );
+    b.t
+}
+
+/// The shutdown screen: what's happening and how far along (containers stopping).
+pub fn shutdown(f: &Fonts, reboot: bool, started: &str, left: usize, total: usize) -> Tree {
+    let mut b = B::new(f);
+    let area = Rect::new(M, M, WIDTH, theme::H - 2.0 * M);
+    let root = b.t.add(None, "shutdown", area, Paint::None);
+    let title = if reboot {
+        "Restarting"
+    } else {
+        "Shutting down"
+    };
+    let ts = Style::new(Face::SemiBold, 32.0).spacing(-0.4);
+    b.text(
+        root,
+        "title",
+        Rect::new(M, 36.0, WIDTH, 40.0),
+        title,
+        ts,
+        INK,
+    );
+    let sub = format!(
+        "Started at {started}. Wait about 10 s after the ring goes dark before unplugging."
+    );
+    let half = sub.find(". ").map(|i| i + 1).unwrap_or(sub.len());
+    b.text(
+        root,
+        "sub1",
+        Rect::new(M, 84.0, WIDTH, 18.0),
+        &sub[..half],
+        body(),
+        INK2,
     );
     b.text(
-        n,
-        "text",
-        Rect::new(M + (WIDTH - nw) / 2.0, TOP + 4.0 * 52.0 + GAP, nw, 20.0),
-        note,
-        small(),
-        INK3,
+        root,
+        "sub2",
+        Rect::new(M, 106.0, WIDTH, 18.0),
+        sub[half..].trim(),
+        body(),
+        INK2,
     );
+    let done = if total == 0 {
+        1.0
+    } else {
+        (total - left.min(total)) as f32 / total as f32
+    };
+    b.t.add(
+        Some(root),
+        "progress",
+        Rect::new(M, 136.0, WIDTH, 8.0),
+        Paint::Bar {
+            pct: done,
+            track: theme::TRACK,
+            fill: INK,
+        },
+    );
+    let containers_done = left == 0;
+    let steps = [
+        (
+            "Stopping containers",
+            if total == 0 {
+                "none".to_string()
+            } else if containers_done {
+                "done".into()
+            } else {
+                format!("{left} left of {total}")
+            },
+            !containers_done,
+        ),
+        (
+            "Stopping services",
+            if containers_done {
+                "now".into()
+            } else {
+                "next".into()
+            },
+            containers_done,
+        ),
+        ("Power off", "last".to_string(), false),
+    ];
+    let mut y = 164.0;
+    for (name, state, active) in steps {
+        let row =
+            b.t.add(Some(root), name, Rect::new(M, y, WIDTH, 22.0), Paint::None);
+        let st = if active {
+            Style::new(Face::SemiBold, 14.0)
+        } else {
+            Style::new(Face::Regular, 14.0)
+        };
+        let c = if active { INK } else { INK3 };
+        let vw = 120.0;
+        b.text(
+            row,
+            "name",
+            Rect::new(M, y, WIDTH - vw - GAP, 22.0),
+            name,
+            st,
+            c,
+        );
+        b.text_right(
+            row,
+            "state",
+            Rect::new(M + WIDTH - vw, y, vw, 22.0),
+            &state,
+            mono(),
+            c,
+        );
+        y += 22.0 + GAP;
+    }
     b.t
 }
 
