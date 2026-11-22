@@ -65,6 +65,8 @@ pub enum Nav {
     Page(usize),
     /// a Services tab: 0 Apps, 1 Host, 2 Web
     Tab(u8),
+    /// fetch the open screen's data again, now
+    Refresh,
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),
@@ -132,6 +134,8 @@ pub enum Paint {
     Chevron(Rgb, bool),
     /// a circular arrow (Restart), drawn to fit the box
     RestartIcon(Rgb),
+    /// two half-circle arrows chasing each other (Refresh), unlike Restart's single arrow
+    RefreshIcon(Rgb),
     /// a hold's progress: the left `frac` of the box, tinted, clipped to its rounded corners
     Progress {
         frac: f32,
@@ -190,6 +194,28 @@ impl Tree {
         });
         self.items.len() - 1
     }
+    /// The 44 × 44 refresh button (top right of every screen): fetches the open screen again.
+    pub fn refresh_button(&mut self, parent: Option<usize>, r: Rect) -> usize {
+        let b = self.add(
+            parent,
+            "refresh",
+            r,
+            Paint::Panel {
+                fill: theme::SURFACE,
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        self.nav(b, Nav::Refresh);
+        self.add(
+            Some(b),
+            "refresh icon",
+            Rect::new(r.x + 12.0, r.y + 12.0, 20.0, 20.0),
+            Paint::RefreshIcon(theme::INK2),
+        );
+        b
+    }
+
     /// Makes `i` a hold target: `nav` fires after a 2 s hold.
     pub fn hold(&mut self, i: usize, nav: Nav) -> usize {
         self.nav(i, nav);
@@ -440,6 +466,33 @@ pub fn render(t: &Tree, c: &mut Canvas) {
                     (back.0 - nx * 4.5, back.1 - ny * 4.5),
                 ]) {
                     c.stroke(&p, *col, 2.2);
+                }
+            }
+            Paint::RefreshIcon(col) => {
+                let (cx, cy, rad) = (r.x + r.w / 2.0, r.cy(), r.w.min(r.h) / 2.0 - 1.5);
+                for (from, to) in [(200.0_f32, 330.0_f32), (20.0, 150.0)] {
+                    let pts: Vec<(f32, f32)> = (0..=13)
+                        .map(|i| {
+                            let a = (from + (to - from) * i as f32 / 13.0).to_radians();
+                            (cx + rad * a.cos(), cy + rad * a.sin())
+                        })
+                        .collect();
+                    if let Some(p) = polyline(&pts) {
+                        c.stroke(&p, *col, 2.0);
+                    }
+                    let end = to.to_radians();
+                    let (ex, ey) = (cx + rad * end.cos(), cy + rad * end.sin());
+                    let (tx, ty) = (-end.sin(), end.cos());
+                    let (nx, ny) = (-ty, tx);
+                    let tip = (ex + tx * 1.5, ey + ty * 1.5);
+                    let back = (tip.0 - tx * 5.0, tip.1 - ty * 5.0);
+                    if let Some(p) = polyline(&[
+                        (back.0 + nx * 4.0, back.1 + ny * 4.0),
+                        tip,
+                        (back.0 - nx * 4.0, back.1 - ny * 4.0),
+                    ]) {
+                        c.stroke(&p, *col, 2.0);
+                    }
                 }
             }
             Paint::Progress {

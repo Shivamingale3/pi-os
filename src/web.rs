@@ -23,8 +23,13 @@ const WRITE_OUT: &str = "%{url}\\t%{response_code}\\t%{time_total}\\t%{errormsg}
 /// One host's answer: (host, HTTP code, ms, curl's error).
 pub type Got = (String, Option<u16>, Option<u32>, Option<String>);
 
-fn url(host: &str) -> String {
-    format!("https://{host}/")
+/// "host" → https://host/ · "host/status.php" → https://host/status.php
+fn url(target: &str) -> String {
+    if target.contains('/') {
+        format!("https://{target}")
+    } else {
+        format!("https://{target}/")
+    }
 }
 
 /// curl's output → (host, code, ms, error), in any order.
@@ -167,6 +172,14 @@ pub fn run() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urls_round_trip() {
+        for t in ["a.example.com", "a.example.com/status.php"] {
+            let line = format!("{}\t200\t0.1\t\n", url(t));
+            assert_eq!(parse_write_out(&line)[0].0, t);
+        }
+    }
 
     #[test]
     fn write_out_lines() {

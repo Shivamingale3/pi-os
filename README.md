@@ -69,6 +69,7 @@ within a minute.
 host nginx                    # a systemd service that should be running
 web status.example.com        # https://HOST/ should answer 200
 web s3.example.com 403        # …or the code given (redirects aren't followed)
+web cloud.example.com/status.php   # a path: an app's own health page
 ```
 
 - **Host services** are read from their cgroup (`/sys/fs/cgroup/system.slice/NAME.service`):
@@ -93,7 +94,9 @@ on the first tab with a problem: **Apps · Host · Web**. Apps lists one row per
 image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
 lifting or sliding away cancels, and a tap does nothing. **Host** lists one row per host service
 (its detail shows the unit, main process and tasks; no Restart). **Web** lists each hostname with
-its response time and HTTP code, problems first, 4 per page. Each screen has a 44 px back button.
+its response time and HTTP code, problems first, 4 per page. Each screen has a 44 px back button and, top right, a refresh button that fetches what it shows
+again at once (website results themselves are taken once a minute by `pios web`). Times are
+12-hour ("8:27 PM").
 Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).
 
 Output goes to the panel (`--fb`), to a PNG, or to a laptop preview window, where a mouse click acts

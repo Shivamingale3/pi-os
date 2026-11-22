@@ -3,10 +3,11 @@
 //!
 //! ```text
 //! # host NAME           a systemd service (NAME or NAME.service) that should be running
-//! # web HOST [CODE]     https://HOST/ should answer CODE (default 200)
+//! # web HOST[/PATH] [CODE]   https://HOST/PATH should answer CODE (default 200)
 //! host nginx
 //! web status.example.com 200
 //! web s3.example.com 403
+//! web cloud.example.com/status.php     (an app's own health page)
 //! ```
 //!
 //! Host services are read from their cgroup (populated = running; memory, uptime): no D-Bus,
@@ -52,13 +53,25 @@ fn is_unit(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-_.@".contains(&b))
 }
 
-/// A hostname we accept: letters, digits, `-.` (no scheme, port or path).
+/// A hostname we accept: letters, digits, `-.` (no scheme or port).
 fn is_hostname(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 253
         && s.contains('.')
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b))
+}
+
+/// `HOST` or `HOST/PATH`; the path is plain URL characters only (it goes to curl as one argument,
+/// never through a shell, but stays boring anyway).
+fn is_target(s: &str) -> bool {
+    let (host, path) = s.split_once('/').unwrap_or((s, ""));
+    is_hostname(host)
+        && path.len() <= 200
+        && !path.contains("..")
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~/%?=&+".contains(&b))
 }
 
 /// Unknown or malformed lines are skipped with a warning (on stderr), never fatal.
@@ -78,14 +91,19 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                     c.host.push(name);
                 }
             }
-            ["web", host, rest @ ..] if is_hostname(host) && rest.len() <= 1 => {
+            ["web", host, rest @ ..] if is_target(host) && rest.len() <= 1 => {
                 let code = match rest.first() {
                     None => Some(200),
                     Some(s) => s.parse::<u16>().ok().filter(|c| (100..600).contains(c)),
                 };
                 match code {
                     Some(code) if !c.web.iter().any(|(h, _)| h == host) => {
-                        c.web.push((host.to_ascii_lowercase(), code))
+                        // the hostname is case-insensitive, the path isn't
+                        let t = match host.split_once('/') {
+                            Some((h, p)) => format!("{}/{p}", h.to_ascii_lowercase()),
+                            None => host.to_ascii_lowercase(),
+                        };
+                        c.web.push((t, code))
                     }
                     Some(_) => {}
                     None => warnings.push(format!("line {}: bad HTTP code: {line}", n + 1)),
@@ -159,17 +177,19 @@ mod tests {
         let (c, w) = parse(
             "# comment\n\nhost nginx\nhost ssh.service  # trailing\nhost nginx\n\
              web A.example.com\nweb s3.example.com 403\nweb bad 200\nweb x.example.com 99\n\
-             host ../etc\nweb x.example.com/path\nfrobnicate\n",
+             host ../etc\nweb x.example.com/../etc\nweb y.example.com/a\"b\nfrobnicate\n\
+             web Cloud.example.com/status.php\nweb q.example.com/x;rm 200\n",
         );
         assert_eq!(c.host, ["nginx", "ssh"]);
         assert_eq!(
             c.web,
             [
                 ("a.example.com".to_string(), 200),
-                ("s3.example.com".into(), 403)
+                ("s3.example.com".into(), 403),
+                ("cloud.example.com/status.php".into(), 200)
             ]
         );
-        assert_eq!(w.len(), 5, "{w:?}");
+        assert_eq!(w.len(), 7, "{w:?}");
     }
 
     #[test]

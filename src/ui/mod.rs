@@ -32,13 +32,13 @@ use home::{Data, OpenIncident};
 
 const API_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// (time "12:04", date "Wed 18 Nov") in local time.
+/// (time "12:04 PM", date "Wed 18 Nov") in local time.
 pub fn local_now() -> (String, String) {
     // SAFETY: time() has no preconditions.
     local_at(unsafe { libc::time(std::ptr::null_mut()) } as i64 * 1000)
 }
 
-/// (time "12:04", date "Wed 18 Nov") of a timestamp (ms), in local time.
+/// (time "12:04 PM", date "Wed 18 Nov") of a timestamp (ms), in local time.
 pub fn local_at(ms: i64) -> (String, String) {
     // SAFETY: localtime_r only writes into the struct we pass.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
@@ -67,7 +67,17 @@ fn format_tm(h: i32, m: i32, wday: i32, mday: i32, mon: i32) -> (String, String)
     ];
     let day = DAYS.get(wday as usize).unwrap_or(&"");
     let month = MONTHS.get(mon as usize).unwrap_or(&"");
-    (format!("{h:02}:{m:02}"), format!("{day} {mday} {month}"))
+    // 12-hour: 0:05 → "12:05 AM", 13:40 → "1:40 PM"
+    let (h12, half) = match h {
+        0 => (12, "AM"),
+        1..=11 => (h, "AM"),
+        12 => (12, "PM"),
+        _ => (h - 12, "PM"),
+    };
+    (
+        format!("{h12}:{m:02} {half}"),
+        format!("{day} {mday} {month}"),
+    )
 }
 
 #[derive(Deserialize)]
@@ -242,7 +252,7 @@ pub fn sample_units(stopped: &[&str]) -> crate::types::Units {
 /// The samples' public hostnames: (host, expected code, answered code, ms).
 pub const SAMPLE_WEB: [(&str, u16, u16, u32); 10] = [
     ("status.example.com", 200, 200, 1080),
-    ("drive.example.com", 302, 302, 1500),
+    ("drive.example.com/status.php", 200, 200, 1500),
     ("vault.example.com", 200, 200, 970),
     ("hub.example.com", 200, 200, 180),
     ("bot.example.com", 200, 200, 420),
@@ -647,7 +657,7 @@ mod tests {
         let update = std::env::var_os("UPDATE_GOLDEN").is_some();
         let mut failures = Vec::new();
         for name in SAMPLES {
-            let home = Home::build(&sample(name).unwrap(), "12:04", "Wed 18 Nov");
+            let home = Home::build(&sample(name).unwrap(), "12:04 PM", "Wed 18 Nov");
             let v = layout::check(&home.tree(&fonts));
             assert!(v.is_empty(), "{name}: {v:#?}");
 
@@ -764,8 +774,17 @@ mod tests {
     }
 
     #[test]
+    fn twelve_hour_clock() {
+        assert_eq!(format_tm(0, 5, 0, 1, 0).0, "12:05 AM");
+        assert_eq!(format_tm(9, 0, 0, 1, 0).0, "9:00 AM");
+        assert_eq!(format_tm(12, 0, 0, 1, 0).0, "12:00 PM");
+        assert_eq!(format_tm(13, 40, 0, 1, 0).0, "1:40 PM");
+        assert_eq!(format_tm(23, 59, 0, 1, 0).0, "11:59 PM");
+    }
+
+    #[test]
     fn status_from_data() {
-        let b = |n| Home::build(&sample(n).unwrap(), "12:04", "Wed 18 Nov");
+        let b = |n| Home::build(&sample(n).unwrap(), "12:04 PM", "Wed 18 Nov");
         assert_eq!(
             (b("good").status, b("good").headline.as_str()),
             (theme::Status::Good, "All good")
@@ -785,7 +804,7 @@ mod tests {
         // a host service stopped, no incident yet: amber, said in words
         let mut d = sample("good").unwrap();
         d.snapshot.as_mut().unwrap().units = Some(sample_units(&["nginx"]));
-        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        let h = Home::build(&d, "12:04 PM", "Wed 18 Nov");
         assert_eq!(
             (h.status, h.line2.as_str()),
             (theme::Status::Attention, "1 host service not running")
@@ -797,7 +816,7 @@ mod tests {
             title: "nginx stopped".into(),
             severity: "critical".into(),
         }];
-        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        let h = Home::build(&d, "12:04 PM", "Wed 18 Nov");
         assert_eq!(
             (h.status, h.headline.as_str()),
             (theme::Status::Down, "1 is down")
@@ -806,20 +825,21 @@ mod tests {
 
         // a website answering an unexpected code: a warn incident → amber
         let mut d = sample("good").unwrap();
-        d.snapshot.as_mut().unwrap().web = Some(sample_web(&[("drive.example.com", Some(200))]));
+        d.snapshot.as_mut().unwrap().web =
+            Some(sample_web(&[("drive.example.com/status.php", Some(302))]));
         d.open = vec![OpenIncident {
             kind: "web".into(),
-            title: "drive.example.com answers 200".into(),
+            title: "drive.example.com/status.php answers 302".into(),
             severity: "warn".into(),
         }];
-        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        let h = Home::build(&d, "12:04 PM", "Wed 18 Nov");
         assert_eq!(h.status, theme::Status::Attention);
         assert_eq!(h.groups[2].value.as_deref(), Some("9/10"));
         // nothing set up: "—"
         let mut d = sample("good").unwrap();
         let s = d.snapshot.as_mut().unwrap();
         (s.units, s.web) = (None, None);
-        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        let h = Home::build(&d, "12:04 PM", "Wed 18 Nov");
         assert_eq!(h.groups[1].value, None);
         assert_eq!(h.line2, "9 of 9 checks passing");
     }
