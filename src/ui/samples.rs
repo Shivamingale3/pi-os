@@ -5,6 +5,7 @@ use super::app::{App, Screen};
 use super::home::Data;
 use super::screens::{Incident, IncidentFull, Snapshots};
 use crate::details::*;
+use crate::services::{Service, Services, key};
 
 /// Fixed "now" for samples and golden images (Sun 22 Nov 2026, 10:00 UTC).
 pub const NOW_MS: i64 = 1_795_341_600_000;
@@ -382,6 +383,183 @@ fn worst_incidents() -> Vec<Incident> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)] // test data: one row per field
+fn svc(
+    n: u64,
+    name: &str,
+    state: &str,
+    health: Option<&str>,
+    mem_mb: u64,
+    up_min: u64,
+    image: &str,
+    ports: &[&str],
+) -> Service {
+    let running = state == "running";
+    Service {
+        id: format!("{n:016x}{}", "0".repeat(48)),
+        name: name.into(),
+        image: image.into(),
+        state: state.into(),
+        health: health.map(String::from),
+        exit_code: (!running).then_some(137),
+        ago: (!running).then(|| "12 m ago".into()),
+        project: Some("apps".into()),
+        service: Some(name.rsplit('-').next().unwrap_or(name).into()),
+        ports: ports.iter().map(|p| p.to_string()).collect(),
+        cpu: running.then_some(0.4 + (n % 5) as f64 * 0.8),
+        mem: running.then_some(mem_mb * MB),
+        mem_limit: (n == 2).then_some(512 * MB),
+        up_sec: running.then_some(up_min * 60),
+    }
+}
+
+/// The good sample's 9 containers (Home: 9 of 9 running). `stopped`: this one has exited.
+fn good_services(stopped: Option<&str>) -> Services {
+    let mut v = vec![
+        svc(
+            1,
+            "app-ci",
+            "running",
+            None,
+            349,
+            248,
+            "ci/server:2.4",
+            &["8080 → 8080"],
+        ),
+        svc(
+            2,
+            "api-backend",
+            "running",
+            Some("healthy"),
+            146,
+            248,
+            "ghcr.io/example/api:1.4",
+            &["127.0.0.1:8081 → 80"],
+        ),
+        svc(
+            3,
+            "database",
+            "running",
+            Some("healthy"),
+            62,
+            248,
+            "postgres:17",
+            &["5432 inside"],
+        ),
+        svc(
+            4,
+            "db-docs",
+            "running",
+            None,
+            242,
+            248,
+            "mongo:8",
+            &["127.0.0.1:27017 → 27017"],
+        ),
+        svc(
+            5,
+            "object-store",
+            "running",
+            None,
+            135,
+            248,
+            "minio/minio:latest",
+            &["9000 → 9000", "9001 → 9001"],
+        ),
+        svc(
+            6,
+            "cache",
+            "running",
+            None,
+            32,
+            248,
+            "redis:7",
+            &["6379 inside"],
+        ),
+        svc(
+            7,
+            "web-api",
+            "running",
+            None,
+            114,
+            248,
+            "ghcr.io/example/web-api:3",
+            &["127.0.0.1:3000 → 3000"],
+        ),
+        svc(
+            8,
+            "web-front",
+            "running",
+            None,
+            13,
+            248,
+            "nginx:1.27",
+            &["80 → 80", "443 → 443"],
+        ),
+        svc(
+            9,
+            "tunnel",
+            "running",
+            None,
+            21,
+            248,
+            "cloudflare/cloudflared:2026.11",
+            &[],
+        ),
+    ];
+    for s in v.iter_mut().filter(|s| Some(s.name.as_str()) == stopped) {
+        *s = svc(6, &s.name, "exited", None, 0, 0, &s.image, &[]);
+        s.ports.clear();
+    }
+    Services {
+        reachable: true,
+        services: v,
+    }
+}
+
+/// Every state and the longest values, over several pages.
+fn worst_services() -> Services {
+    let states = [
+        "running",
+        "exited",
+        "restarting",
+        "paused",
+        "created",
+        "dead",
+        "running",
+    ];
+    let services = (0..40u64)
+        .map(|i| {
+            let st = states[i as usize % states.len()];
+            let mut s = svc(
+                i + 1,
+                &format!("photo-library-db-replica-secondary-with-a-very-long-name-{i}"),
+                st,
+                [None, Some("unhealthy"), Some("starting"), Some("healthy")][i as usize % 4],
+                999 * 1024 * 1024,
+                60 * 24 * 999,
+                "registry.example.internal:5000/a/very/long/image/path/name:with-a-long-tag-1.2.3",
+                &[
+                    "[2001:db8::1]:65535 → 65535/udp",
+                    "127.0.0.1:65534 → 65534",
+                    "65533 inside",
+                ],
+            );
+            s.cpu = s.cpu.map(|_| 3999.9);
+            s.mem_limit = Some(999 * GB * 1024);
+            s.exit_code = s.exit_code.map(|_| -2147483648);
+            s.ago = s.ago.map(|_| "999 mo ago".into());
+            s.project = Some("a-very-long-compose-project-name".into());
+            s.service = Some("and-an-equally-long-service-name".into());
+            s
+        })
+        .collect();
+    Services {
+        reachable: true,
+        services,
+    }
+}
+
 /// An app showing `screen` with the named sample (good, attention, down, waiting, worst).
 pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
     let home = super::sample(name)?;
@@ -405,6 +583,9 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
                 snapshots: Snapshots::default(),
             });
             a.incidents = Some(list);
+            a.services = Some(worst_services());
+            a.svc_cpu = curve(12, 3999.0, 1.0, 0.0, None).into();
+            a.svc_mem = curve(12, 9e15, 1e14, 1.0, None).into();
         }
         _ => {
             a.cpu = Some(good_cpu());
@@ -424,6 +605,25 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             let list = good_incidents();
             a.incident = Some(full(list[2].clone(), &home, true));
             a.incidents = Some(list);
+            a.services = Some(good_services((name == "down").then_some("cache")));
+            a.svc_cpu = vec![1.2, 1.4, 1.1, 2.0, 1.8, 1.5, 1.6, 2.4, 1.9, 1.7, 2.1, 2.0].into();
+            a.svc_mem = [140, 141, 141, 142, 143, 143, 144, 145, 145, 146, 146, 146]
+                .map(|m| (m * MB) as f32)
+                .into();
+        }
+    }
+    if let Screen::Container(_) = screen
+        && let Some(d) = &a.services
+    {
+        // good: a healthy one with a limit; down: the stopped one; worst: the first problem
+        let pick = d
+            .services
+            .iter()
+            .find(|s| s.name == "api-backend")
+            .filter(|_| name != "down")
+            .or_else(|| super::screens::sorted(&d.services).first().copied());
+        if let Some(s) = pick {
+            a.screen = Some(Screen::Container(key(&s.id)));
         }
     }
     if let Screen::Incident(_) = screen
@@ -599,6 +799,87 @@ mod tests {
     }
 
     /// Taps: every target on every screen goes where it says; nothing in the gaps.
+    #[test]
+    fn services_never_collide() {
+        let f = Fonts::load();
+        let mut n = 0;
+        for base in ["good", "down", "worst"] {
+            let a0 = sample_app(base, Screen::Services).unwrap();
+            let all = a0.services.clone().unwrap();
+            for count in 0..=all.services.len().min(20) {
+                for reachable in [true, false] {
+                    let mut a = sample_app(base, Screen::Services).unwrap();
+                    let mut d = all.clone();
+                    d.services.truncate(count);
+                    d.reachable = reachable;
+                    let pages = count
+                        .div_ceil(crate::ui::screens::tiles_per_page(count))
+                        .max(1);
+                    a.services = Some(d);
+                    for p in 0..=pages {
+                        a.page = p;
+                        let v = layout::check(&tree(&a, &f));
+                        assert!(v.is_empty(), "{base} services n={count} page={p}: {v:#?}");
+                        n += 1;
+                    }
+                }
+            }
+            for s in &all.services {
+                let mut a = sample_app(base, Screen::Services).unwrap();
+                a.go(Nav::Container(key(&s.id)));
+                for hist in [0usize, 1, 12] {
+                    a.svc_cpu.truncate(hist);
+                    a.svc_mem.truncate(hist);
+                    let v = layout::check(&tree(&a, &f));
+                    assert!(
+                        v.is_empty(),
+                        "{base} container {} hist={hist}: {v:#?}",
+                        s.name
+                    );
+                    n += 1;
+                }
+            }
+            // removed while open, and not loaded yet
+            let mut a = sample_app(base, Screen::Container(0)).unwrap();
+            a.screen = Some(Screen::Container(u64::MAX));
+            assert!(layout::check(&tree(&a, &f)).is_empty());
+            a.services = None;
+            assert!(layout::check(&tree(&a, &f)).is_empty());
+        }
+        assert!(n > 200, "{n}");
+    }
+
+    #[test]
+    fn taps_reach_services_and_back() {
+        let f = Fonts::load();
+        let centre = |t: &layout::Tree, name: &str| {
+            let r = t.items.iter().find(|i| i.name == name).unwrap().rect;
+            (r.x + r.w / 2.0, r.cy())
+        };
+        let tap = |a: &mut App, name: &str| {
+            let t = tree(a, &f);
+            let (x, y) = centre(&t, name);
+            let nav = t.items[panel::hit(&t, x, y).unwrap()].nav.unwrap();
+            a.go(nav);
+        };
+        let mut a = sample_app("down", Screen::Home).unwrap();
+        tap(&mut a, "hero card");
+        assert_eq!(a.screen(), Screen::Services);
+        tap(&mut a, "service"); // the first tile is the stopped one
+        assert_eq!(a.open_container().map(|s| s.name.as_str()), Some("cache"));
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Services);
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Home);
+        // paging keeps the Services screen
+        let mut a = sample_app("worst", Screen::Services).unwrap();
+        tap(&mut a, "next");
+        assert_eq!((a.screen(), a.page), (Screen::Services, 1));
+        tap(&mut a, "service");
+        tap(&mut a, "back");
+        assert_eq!((a.screen(), a.page), (Screen::Services, 1));
+    }
+
     #[test]
     fn taps_navigate() {
         let f = Fonts::load();

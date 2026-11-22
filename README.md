@@ -39,7 +39,7 @@ curl --unix-socket data/pios.sock http://pios/now
 | `GET /trend?metric=NAME` | last 24 h: `{"metric", "windowMs", "points": [[ts, value], …]}` |
 | `GET /incidents` | the last 7 days, newest first, without snapshots |
 | `GET /incidents/ID` | one incident with `snapshots.start`, `.peak` and `.end` |
-| `GET /details/TILE` | `cpu`, `temps`, `memory` or `disk`, collected on request (only while that screen is open) |
+| `GET /details/TILE` | `cpu`, `temps`, `memory`, `disk` or `services`, collected on request (only while that screen is open) |
 
 Trend metrics: `cpu.percent` · `cpu.tempC` · `mem.usedPercent` · `disk.usedPercent` · `load.1m` ·
 `net.rxBytesPerSec` · `net.txBytesPerSec`.
@@ -64,8 +64,11 @@ times are the first bad and first clear readings.
 frequency, load average, 24 h graph, busiest processes), **Temperatures** (every sensor with its
 limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, biggest users) and **Disk**
 (filesystems, the drive, live read/write, Docker disk usage). **History** lists the last 7 days of
-incidents; a row opens its start, peak and end snapshots. Each screen has a 44 px back button.
-Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk}`).
+incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**:
+one tile per container, problems first (red: not running; amber: unhealthy, restarting or paused),
+9 per page; a tile opens the container (state, uptime or exit code, CPU and memory with its limit,
+image, Compose project, ports). Each screen has a 44 px back button.
+Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).
 
 Output goes to the panel (`--fb`), to a PNG, or to a laptop preview window, where a mouse click acts
 as a tap.

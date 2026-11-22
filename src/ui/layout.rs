@@ -60,8 +60,12 @@ pub enum Nav {
     Memory,
     Disk,
     History,
+    Services,
+    /// a page of the open paged screen (History, Services)
     Page(usize),
     Incident(i64),
+    /// a container, by `services::key` of its ID
+    Container(u64),
     Back,
 }
 

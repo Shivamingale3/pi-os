@@ -1,4 +1,5 @@
-//! The detail screens: CPU, Temperatures, Memory, Disk, History and one incident.
+//! The detail screens: CPU, Temperatures, Memory, Disk, History, one incident, Services and
+//! one container.
 //! Same rules as Home (layout::check proves them): 12 px from the edges, 8 px between cards,
 //! 12 px inside cards, a 44 × 44 back button, text cut with "…" or shrunk, never clipped.
 //!
@@ -15,6 +16,7 @@ use super::layout::{Marker, Nav, Paint, Rect, Tree};
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
 use crate::details::{CpuDetails, DiskDetails, MemDetails, TempDetails};
 use crate::rules::THRESHOLDS;
+use crate::services::{Service, Services};
 use crate::types::Snapshot;
 
 const M: f32 = theme::SCREEN_MARGIN;
@@ -1328,7 +1330,20 @@ pub fn history(
     }
     // pager (only when there is more than one page)
     if pages > 1 {
-        let py = TOP + ROWS_PER_PAGE as f32 * (56.0 + GAP);
+        pager(
+            &mut b,
+            TOP + ROWS_PER_PAGE as f32 * (56.0 + GAP),
+            page,
+            pages,
+        );
+    }
+    b.t
+}
+
+/// ‹ 1 / 3 › at `py`, full width; the arrows keep the open screen and change its page.
+fn pager(b: &mut B, py: f32, page: usize, pages: usize) {
+    {
+        let f = b.f;
         let pager =
             b.t.add(None, "pager", Rect::new(M, py, WIDTH, 44.0), Paint::None);
         for (name, x, enabled, nav, flip) in [
@@ -1379,7 +1394,6 @@ pub fn history(
             INK2,
         );
     }
-    b.t
 }
 
 // ---------------- one incident ----------------
@@ -1547,6 +1561,342 @@ pub fn incident(
             ),
         }
         x += w + GAP;
+    }
+    b.t
+}
+
+// ---------------- Services ----------------
+
+/// How a container is doing: red when it isn't running (as Home counts it), amber when Docker
+/// says it's unhealthy, restarting or paused.
+pub fn service_status(s: &Service) -> Status {
+    match s.state.as_str() {
+        "running" if s.health.as_deref() == Some("unhealthy") => Status::Attention,
+        "running" => Status::Good,
+        "restarting" | "paused" => Status::Attention,
+        _ => Status::Down,
+    }
+}
+
+/// Problems first (red, then amber), then by name.
+pub fn sorted(list: &[Service]) -> Vec<&Service> {
+    let rank = |s: &Service| match service_status(s) {
+        Status::Down => 0,
+        Status::Attention => 1,
+        _ => 2,
+    };
+    let mut v: Vec<&Service> = list.iter().collect();
+    v.sort_by(|a, b| rank(a).cmp(&rank(b)).then(a.name.cmp(&b.name)));
+    v
+}
+
+/// "4 h", "12 m", "3 d"
+fn short_dur(sec: u64) -> String {
+    match sec {
+        0..60 => format!("{sec} s"),
+        60..3600 => format!("{} m", sec / 60),
+        3600..86400 => format!("{} h", sec / 3600),
+        _ => format!("{} d", sec / 86400),
+    }
+}
+
+/// The tile's second line: health or uptime, and memory; or why it isn't running.
+fn tile_line(s: &Service) -> String {
+    let mem = s
+        .mem
+        .map(|m| format!(" · {}", bytes_s(m)))
+        .unwrap_or_default();
+    match s.state.as_str() {
+        "running" => match (&s.health, s.up_sec) {
+            (Some(h), _) => format!("{h}{mem}"),
+            (None, Some(u)) => format!("up {}{mem}", short_dur(u)),
+            (None, None) => format!("running{mem}"),
+        },
+        "exited" => match &s.ago {
+            Some(a) => format!("exited {a}"),
+            None => "exited".into(),
+        },
+        "created" => "never started".into(),
+        "paused" => format!("paused{mem}"),
+        other => other.into(),
+    }
+}
+
+fn status_marker(st: Status) -> Marker {
+    match st {
+        Status::Down => Marker::Square(status_colors(st).shape),
+        Status::Attention => Marker::Triangle(status_colors(st).shape),
+        Status::Good => Marker::Dot(status_colors(st).shape),
+        Status::Unknown => Marker::Ring(INK3),
+    }
+}
+
+pub const TILE_W: [f32; 3] = [146.0, 146.0, 148.0];
+const TILE_H: f32 = 72.0;
+
+/// Tiles per page: a full 3 × 3 grid when everything fits, else 2 rows + the pager.
+pub fn tiles_per_page(n: usize) -> usize {
+    if n <= 9 { 9 } else { 6 }
+}
+
+pub fn services(f: &Fonts, d: Option<&Services>, page: usize) -> Tree {
+    let mut b = B::new(f);
+    let Some(d) = d else {
+        return reading(&mut b, "Services");
+    };
+    b.header("Services", "");
+    if !d.reachable || d.services.is_empty() {
+        let (c, r) = b.card("empty", Rect::new(M, TOP, WIDTH, 244.0), "", "");
+        b.note(
+            c,
+            r,
+            if d.reachable {
+                "No containers"
+            } else {
+                "Docker not reachable"
+            },
+        );
+        return b.t;
+    }
+    let list = sorted(&d.services);
+    let per = tiles_per_page(list.len());
+    let pages = list.len().div_ceil(per);
+    let page = page.min(pages - 1);
+    let name_style = Style::new(Face::SemiBold, size::TITLE.0);
+    for (i, s) in list.iter().skip(page * per).take(per).enumerate() {
+        let (row, col) = (i / 3, i % 3);
+        let x = M + TILE_W[..col].iter().map(|w| w + GAP).sum::<f32>();
+        let r = Rect::new(x, TOP + row as f32 * (TILE_H + GAP), TILE_W[col], TILE_H);
+        let st = service_status(s);
+        let sc = status_colors(st);
+        let tile = b.t.add(
+            None,
+            "service",
+            r,
+            Paint::Panel {
+                fill: if st == Status::Good {
+                    theme::SURFACE
+                } else {
+                    sc.card
+                },
+                radius: theme::RADIUS_TILE,
+                border: (st != Status::Good).then_some(sc.border),
+            },
+        );
+        b.t.nav(tile, Nav::Container(crate::services::key(&s.id)));
+        b.t.pad(tile, PAD_TILE);
+        let inner = r.inset(PAD_TILE);
+        b.t.add(
+            Some(tile),
+            "marker",
+            Rect::new(inner.right() - 10.0, inner.y + 6.0, 10.0, 10.0),
+            Paint::Marker(status_marker(st)),
+        );
+        b.text(
+            tile,
+            "name",
+            Rect::new(inner.x, inner.y, inner.w - 10.0 - GAP, 22.0),
+            &s.name,
+            name_style,
+            INK,
+        );
+        b.text(
+            tile,
+            "line",
+            Rect::new(inner.x, inner.bottom() - 18.0, inner.w, 18.0),
+            &tile_line(s),
+            body(),
+            if st == Status::Good { INK2 } else { sc.text },
+        );
+    }
+    if pages > 1 {
+        pager(&mut b, theme::H - M - 44.0, page, pages);
+    }
+    b.t
+}
+
+fn capitalized(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loaded: bool) -> Tree {
+    let mut b = B::new(f);
+    let Some(s) = s else {
+        if !loaded {
+            return reading(&mut b, "Container");
+        }
+        b.header("Container", "");
+        let (c, r) = b.card("gone", Rect::new(M, TOP, WIDTH, 244.0), "", "");
+        b.note(c, r, "This container no longer exists");
+        return b.t;
+    };
+    b.header(&s.name, "");
+    let st = service_status(s);
+    let sc = status_colors(st);
+    let bad = st != Status::Good;
+
+    // state
+    let r0 = Rect::new(M, TOP, 186.0, 120.0);
+    let (c, r) = b.card("state", r0, "STATE", "");
+    if bad {
+        b.t.items[c].paint = Paint::Panel {
+            fill: sc.card,
+            radius: theme::RADIUS_TILE,
+            border: Some(sc.border),
+        };
+    }
+    b.value(
+        c,
+        "value",
+        Rect::new(r.x, r.y, r.w, 32.0),
+        &capitalized(&s.state),
+        "",
+        if bad { sc.text } else { INK },
+    );
+    let line1 = match (s.state.as_str(), s.up_sec, &s.ago) {
+        ("running" | "paused", Some(u), _) => format!("for {}", duration(u as i64 * 1000)),
+        (_, _, Some(a)) => a.clone(),
+        _ => String::new(),
+    };
+    let (line2, c2) = match (&s.health, s.exit_code) {
+        (Some(h), _) if s.state == "running" => {
+            (h.clone(), if h == "unhealthy" { sc.text } else { INK3 })
+        }
+        (_, Some(code)) => (
+            format!("exit code {code}"),
+            if code == 0 { INK3 } else { sc.text },
+        ),
+        _ => (String::new(), INK3),
+    };
+    let mut y = r.y + 32.0 + MIN_GAP;
+    for (name, text, color) in [("since", line1, INK2), ("health", line2, c2)] {
+        if text.is_empty() {
+            continue;
+        }
+        b.text(c, name, Rect::new(r.x, y, r.w, 18.0), &text, body(), color);
+        y += 18.0 + MIN_GAP;
+    }
+
+    // right now
+    let limit = s
+        .mem_limit
+        .filter(|_| s.state == "running")
+        .map(|l| format!("limit {}", bytes_s(l)))
+        .unwrap_or_default();
+    let (c, r) = b.card(
+        "usage",
+        Rect::new(M + 186.0 + GAP, TOP, WIDTH - 186.0 - GAP, 120.0),
+        "RIGHT NOW",
+        &limit,
+    );
+    if s.state != "running" {
+        b.text(
+            c,
+            "note",
+            Rect::new(r.x, r.y, r.w, 18.0),
+            "Not running",
+            body(),
+            INK3,
+        );
+        b.text(
+            c,
+            "note 2",
+            Rect::new(r.x, r.y + 18.0 + MIN_GAP, r.w, 18.0),
+            "no CPU or memory in use",
+            body(),
+            INK3,
+        );
+    } else {
+        let label_w = 56.0;
+        let vw = 72.0;
+        let mut y = r.y;
+        for (name, v, hist) in [
+            ("CPU", s.cpu.map(|c| format!("{c:.1}%")), cpu),
+            ("Memory", s.mem.map(bytes_s), mem),
+        ] {
+            let row =
+                b.t.add(Some(c), name, Rect::new(r.x, y, r.w, 32.0), Paint::None);
+            b.text(
+                row,
+                "name",
+                Rect::new(r.x, y, label_w, 32.0),
+                name,
+                body(),
+                INK3,
+            );
+            b.text_right(
+                row,
+                "value",
+                Rect::new(r.x + label_w, y, vw, 32.0),
+                v.as_deref().unwrap_or("—"),
+                mono(),
+                INK,
+            );
+            if hist.len() >= 2 {
+                let sx = r.x + label_w + vw + GAP;
+                b.t.add(
+                    Some(row),
+                    "spark",
+                    Rect::new(sx, y + 4.0, r.right() - sx, 24.0),
+                    Paint::Sparkline {
+                        values: hist.to_vec(),
+                        min_span: if name == "CPU" { 2.0 } else { 1.0 },
+                        color: INK2,
+                    },
+                );
+            }
+            y += 32.0 + GAP;
+        }
+    }
+
+    // container
+    let (c, r) = b.card(
+        "container",
+        Rect::new(M, TOP + 120.0 + GAP, WIDTH, 116.0),
+        "CONTAINER",
+        "",
+    );
+    let compose = match (&s.project, &s.service) {
+        (Some(p), Some(sv)) => format!("{p} · {sv}"),
+        (Some(p), None) => p.clone(),
+        _ => "not started by Compose".into(),
+    };
+    let ports = if !s.ports.is_empty() {
+        s.ports.join(", ")
+    } else if s.state == "running" {
+        "none".into()
+    } else {
+        "none while stopped".into()
+    };
+    let mut y = r.y;
+    for (name, v) in [
+        ("Image", s.image.clone()),
+        ("Compose", compose),
+        ("Ports", ports),
+    ] {
+        let key_w = 72.0;
+        let row =
+            b.t.add(Some(c), "row", Rect::new(r.x, y, r.w, 18.0), Paint::None);
+        b.text(
+            row,
+            "name",
+            Rect::new(r.x, y, key_w, 18.0),
+            name,
+            body(),
+            INK2,
+        );
+        b.text_right(
+            row,
+            "value",
+            Rect::new(r.x + key_w + GAP, y, r.w - key_w - GAP, 18.0),
+            &v,
+            mono(),
+            INK,
+        );
+        y += 18.0 + MIN_GAP;
     }
     b.t
 }

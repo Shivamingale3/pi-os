@@ -256,7 +256,7 @@ pub fn sample(name: &str) -> Option<Data> {
                 12.0,
                 Some((8, 9)),
             )),
-            open: vec![incident("container", "redis stopped")],
+            open: vec![incident("container", "cache stopped")],
             ..Data::default()
         }),
         "waiting" => Data::default(),
@@ -359,6 +359,15 @@ fn make_app(sample_name: Option<&str>, screen: app::Screen, socket: &Path) -> Re
             let mut a = app::App::live();
             a.screen = Some(screen);
             a.update(socket, std::time::Instant::now());
+            // `--screen container`: the first one the Services screen lists
+            if screen == app::Screen::Container(0)
+                && let Some(s) = a
+                    .services
+                    .as_ref()
+                    .and_then(|d| screens::sorted(&d.services).first().map(|s| s.id.clone()))
+            {
+                a.screen = Some(app::Screen::Container(crate::services::key(&s)));
+            }
             Ok(a)
         }
     }
