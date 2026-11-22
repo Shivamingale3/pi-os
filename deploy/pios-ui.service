@@ -1,7 +1,7 @@
 # PiOS screen: Home on the 480x320 panel, touch, backlight.
-# Installed by `pios setup` but NOT enabled: start it to take over the panel from tft-btop
-# (Conflicts= stops tft-btop); start tft-btop to get the old session back. A reboot brings
-# back whatever is enabled at boot.
+# Installed by `pios setup`, which never enables or disables it: `systemctl enable pios-ui`
+# makes it the screen at boot (disable the panel's previous service). Conflicts= stops that
+# service whenever pios-ui starts; `pios uninstall` disables pios-ui.
 [Unit]
 Description=PiOS screen (480x320 panel)
 Conflicts=tft-btop.service
@@ -59,3 +59,6 @@ ProtectProc=invisible
 IPAddressDeny=any
 RemoveIPC=yes
 KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target

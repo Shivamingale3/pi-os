@@ -103,13 +103,16 @@ binary and are installed by `pios setup`.
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true` and `GET /system/df`; anything else gets 403 |
-| `pios-ui.service` (**installed, not enabled**) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
+| `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
 `systemd-analyze security` rates the agent 1.0 ("OK"; it may read other processes' CPU use for the CPU screen), the helper 0.7 and the screen 0.8 ("SAFE").
 
 ```bash
 sudo systemctl start pios-ui     # PiOS takes the panel (stops tft-btop)
 sudo systemctl start tft-btop    # back to the old session (stops pios-ui)
+
+# make it the screen at boot (setup never changes this; uninstall disables pios-ui)
+sudo systemctl disable tft-btop && sudo systemctl enable pios-ui
 ```
 
 ```bash

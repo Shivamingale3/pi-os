@@ -24,7 +24,7 @@ pub const UNITS: [(&str, &str); 3] = [
         include_str!("../deploy/pios-helper.service"),
     ),
 ];
-/// Installed but not enabled: the user decides when PiOS takes the panel.
+/// Installed but never enabled or disabled by setup: the user decides when PiOS takes the panel.
 pub const UI_UNIT: (&str, &str) = ("pios-ui.service", include_str!("../deploy/pios-ui.service"));
 const SUDOERS: &str = include_str!("../deploy/sudoers-pios-deploy");
 
@@ -214,6 +214,7 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
             "disable",
             "--quiet",
             "--now",
+            "pios-ui.service",
             "pios-agent.service",
             "pios-helper.socket",
         ],
@@ -319,10 +320,12 @@ mod tests {
         ] {
             assert!(ui.lines().any(|l| l == line), "ui unit lacks {line}");
         }
-        assert!(
-            !ui.contains("[Install]"),
-            "the ui unit must not be enabled at boot by setup"
-        );
+        assert!(ui.lines().any(|l| l == "WantedBy=multi-user.target"));
+        // setup leaves the screen's boot state to the user
+        let src = include_str!("setup.rs");
+        let setup = &src[src.find("pub fn setup").unwrap()..src.find("pub fn uninstall").unwrap()];
+        assert!(!setup.contains("\"enable\", \"--quiet\", \"pios-ui"));
+        assert!(setup.contains("\"try-restart\", \"pios-ui.service\""));
         assert!(
             SUDOERS
                 .lines()
