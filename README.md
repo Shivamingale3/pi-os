@@ -39,6 +39,7 @@ curl --unix-socket data/pios.sock http://pios/now
 | `GET /trend?metric=NAME` | last 24 h: `{"metric", "windowMs", "points": [[ts, value], …]}` |
 | `GET /incidents` | the last 7 days, newest first, without snapshots |
 | `GET /incidents/ID` | one incident with `snapshots.start`, `.peak` and `.end` |
+| `GET /events` | last 7 days of SSH logins (and failures), sudo commands, Jenkins deploys and boots, newest first; repeated logins merged (×N) |
 | `GET /details/TILE` | `cpu`, `temps`, `memory`, `disk` or `services`, collected on request (only while that screen is open) |
 | `POST /containers/ID/restart` | the screen's one action: restarts (or starts) a container from the latest snapshot, at most once a minute each; answers 202 at once, progress shows in `/details/services` |
 
@@ -87,8 +88,10 @@ web cloud.example.com/status.php   # a path: an app's own health page
 `assets/fonts/`). It draws **Home**, and a tap on a Home tile opens its detail screen: **CPU** (per-core load and
 frequency, load average, 24 h graph, busiest processes), **Temperatures** (every sensor with its
 limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, biggest users) and **Disk**
-(filesystems, the drive, live read/write, Docker disk usage). **History** lists the last 7 days of
-incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**,
+(filesystems, the drive, live read/write, Docker disk usage). **History** has two tabs. **Incidents** lists the last 7 days of
+incidents; a row opens its start, peak and end snapshots. **Events** lists SSH logins (and
+failures), sudo commands, Jenkins deploys and boots from the journal (read once a minute by the
+agent, which is in the `systemd-journal` group for this), one day per page. The big status card opens **Services**,
 on the first tab with a problem: **Apps · Host · Web**. Apps lists one row per container (full name, health or uptime, memory), problems first (red: not running; amber: unhealthy, restarting or paused),
 4 per page, or 3 with the ‹ › pager; a row opens the container (state, uptime or exit code, CPU and memory with its limit,
 image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
@@ -133,7 +136,7 @@ binary and are installed by `pios setup`.
 
 | Unit | Runs as | What |
 |---|---|---|
-| `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
+| `pios-agent.service` | `pios` (no shell, no Docker group; in `systemd-journal` to read the journal) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
 | `pios-web.service` | throwaway (`DynamicUser`) | the website checks: one `curl --parallel` a minute, results in `/run/pios-web/`. The only unit with network access. `MemoryMax=48M`, `CPUQuota=10%`, read-only system |
 | `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |

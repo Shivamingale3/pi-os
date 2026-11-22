@@ -309,6 +309,7 @@ mod tests {
         let agent = UNITS[0].1;
         for line in [
             "User=pios",
+            "SupplementaryGroups=systemd-journal",
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
             "MemoryMax=80M",

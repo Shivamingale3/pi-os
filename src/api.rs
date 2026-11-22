@@ -5,6 +5,7 @@
 //!   GET /trend?metric=NAME    last 24 h: {"metric", "points": [[ts, value], …]}
 //!   GET /incidents            last 7 days, newest first, without snapshots
 //!   GET /incidents/ID         one incident with its start / peak / end snapshots
+//!   GET /events               last 7 days of SSH logins, sudo, deploys, boots (newest first)
 //!   GET /details/TILE         cpu · temps · memory · disk · services, collected on request (screen open)
 //!   POST /containers/ID/restart   the screen's one action (202 at once; progress in /details/services)
 //!
@@ -178,6 +179,8 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
         }
         "/incidents" => store::list_incidents(db, now_ms() - INCIDENT_KEEP_MS)
             .map(|list| (200, json!({"incidents": list}))),
+        "/events" => store::list_events(db, now_ms() - INCIDENT_KEEP_MS)
+            .map(|list| (200, json!({"events": list}))),
         _ => match path.strip_prefix("/incidents/").map(str::parse::<i64>) {
             Some(Ok(id)) => store::get_incident(db, id).map(|found| match found {
                 Some(v) => (200, v),
@@ -186,7 +189,7 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
             _ => {
                 return (
                     404,
-                    json!({"error": "not found", "routes": ["/now", "/trend?metric=", "/incidents", "/incidents/ID"]}),
+                    json!({"error": "not found", "routes": ["/now", "/trend?metric=", "/incidents", "/incidents/ID", "/events"]}),
                 );
             }
         },

@@ -36,6 +36,7 @@ impl Screen {
             "history" => Screen::History,
             "incident" => Screen::Incident(1),
             "services" | "host" | "web" => Screen::Services,
+            "events" => Screen::History,
             "container" => Screen::Container(0),
             _ => return None,
         })
@@ -51,13 +52,23 @@ pub fn tab_for(name: &str) -> screens::Tab {
     }
 }
 
-pub const SCREENS: [&str; 11] = [
+/// `--screen events`: History on its Events tab.
+pub fn hist_tab_for(name: &str) -> screens::HistTab {
+    if name == "events" {
+        screens::HistTab::Events
+    } else {
+        screens::HistTab::Incidents
+    }
+}
+
+pub const SCREENS: [&str; 12] = [
     "home",
     "cpu",
     "temps",
     "memory",
     "disk",
     "history",
+    "events",
     "incident",
     "services",
     "host",
@@ -98,11 +109,19 @@ pub struct App {
     pub refused: Option<(u64, String)>,
     /// the open Services tab
     pub tab: screens::Tab,
+    /// History's open tab, and the Events tab's data
+    pub hist_tab: screens::HistTab,
+    pub events: Option<Vec<crate::events::Event>>,
     /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
     pub refreshing: Option<Instant>,
     last: HashMap<&'static str, Instant>,
     /// false for built-in samples: never fetch
     pub live: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct EventsOut {
+    events: Vec<crate::events::Event>,
 }
 
 /// Averages the points into at most `n` buckets (keeps the shape, drops the detail).
@@ -142,12 +161,25 @@ impl App {
             Nav::Disk => Screen::Disk,
             Nav::History => {
                 self.page = 0;
+                self.hist_tab = screens::HistTab::Incidents;
                 Screen::History
             }
             Nav::Services => {
                 self.page = 0;
                 self.tab = self.problem_tab();
                 Screen::Services
+            }
+            Nav::Tab(i) if self.screen() == Screen::History => {
+                let t = if i == 0 {
+                    screens::HistTab::Incidents
+                } else {
+                    screens::HistTab::Events
+                };
+                if t != self.hist_tab {
+                    self.page = 0;
+                }
+                self.hist_tab = t;
+                Screen::History
             }
             Nav::Tab(i) => {
                 let t = screens::Tab::ALL[(i as usize).min(2)];
@@ -215,7 +247,7 @@ impl App {
     }
 
     /// What this screen needs, and how often.
-    fn needs(&self) -> Vec<(&'static str, Duration)> {
+    pub(crate) fn needs(&self) -> Vec<(&'static str, Duration)> {
         let s = Duration::from_secs;
         let mut v = vec![("home", s(5))];
         match self.screen() {
@@ -224,6 +256,9 @@ impl App {
             Screen::Temps => v.extend([("temps", s(5)), ("temp_trend", s(60))]),
             Screen::Memory => v.push(("mem", s(5))),
             Screen::Disk => v.push(("disk", s(3))),
+            Screen::History if self.hist_tab == screens::HistTab::Events => {
+                v.push(("events", s(30)))
+            }
             Screen::History => v.push(("incidents", s(10))),
             Screen::Incident(_) => v.push(("incident", s(10))),
             Screen::Services => v.push(("services", s(5))),
@@ -293,6 +328,11 @@ impl App {
                             }
                         }
                     }
+                }
+                "events" => {
+                    self.events = super::get_json::<EventsOut>(socket, "/events")
+                        .ok()
+                        .map(|l| l.events)
                 }
                 "incident" => {
                     if let Screen::Incident(id) = self.screen() {
@@ -424,9 +464,15 @@ impl App {
             Screen::Temps => screens::temps(f, self.temps.as_ref(), &self.temp_trend),
             Screen::Memory => screens::memory(f, self.mem.as_ref()),
             Screen::Disk => screens::disk(f, self.disk.as_ref(), &reads, &writes),
-            Screen::History => {
-                screens::history(f, self.incidents.as_deref(), self.page, now_ms, at)
-            }
+            Screen::History => screens::history(
+                f,
+                self.incidents.as_deref(),
+                self.events.as_deref(),
+                self.hist_tab,
+                self.page,
+                now_ms,
+                at,
+            ),
             Screen::Incident(_) => screens::incident(f, self.incident.as_ref(), now_ms, at),
             Screen::Services => {
                 screens::services(f, self.services.as_ref(), self.tab, self.page, at)
