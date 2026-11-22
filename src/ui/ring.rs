@@ -5,8 +5,8 @@
 //! loop hands it the current state each turn (`Shared`).
 //!
 //! Patterns (the choices are on the LED ring screen, saved in the screen's state file):
-//!   All good          breathe 8 s, 4 → 30 % · steady · off
-//!   Needs attention   double pulse every 6 s, 10 → 70 % · blink · steady
+//!   All good          breathe 4 s, 5 → 100 % (as case-ring-breathe did) · steady · off
+//!   Needs attention   double pulse every 6 s, 15 → 100 % · blink · steady
 //!   Something down    1 s blink for a minute, then the double pulse · pulse · steady
 //!   Starting          1.5 s rising ramps until data arrives
 //!   Holding Restart   fills with the hold; two flashes when it fires
@@ -63,7 +63,7 @@ impl Pattern {
 pub const GOOD: [Pattern; 3] = [Pattern::Breathe, Pattern::Steady, Pattern::Off];
 pub const ATTENTION: [Pattern; 3] = [Pattern::Pulse, Pattern::Blink, Pattern::Steady];
 pub const DOWN: [Pattern; 3] = [Pattern::Blink, Pattern::Pulse, Pattern::Steady];
-pub const BRIGHTNESS: [(&str, f32); 3] = [("Low", 0.35), ("Medium", 0.65), ("High", 1.0)];
+pub const BRIGHTNESS: [(&str, f32); 3] = [("Low", 0.45), ("Medium", 0.7), ("High", 1.0)];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
@@ -80,7 +80,7 @@ impl Default for Settings {
             good: Pattern::Breathe,
             attention: Pattern::Pulse,
             down: Pattern::Blink,
-            brightness: 1,
+            brightness: 2,
         }
     }
 }
@@ -185,14 +185,15 @@ pub fn pattern_level(role: Role, p: Pattern, t: f32) -> f32 {
     match p {
         Pattern::Off => 0.0,
         Pattern::Steady => match role {
-            Role::Good => 0.2,
-            Role::Attention => 0.5,
+            Role::Good => 0.6,
+            Role::Attention => 0.8,
             Role::Down => 1.0,
         },
-        Pattern::Breathe => 0.04 + 0.26 * (0.5 - 0.5 * (t / 8.0 * TAU).cos()),
+        // the old case-ring-breathe: 4 s, 5 → 100 % (perceptual), never fully off
+        Pattern::Breathe => 0.05 + 0.95 * (0.5 - 0.5 * (t / 4.0 * TAU).cos()),
         Pattern::Pulse => {
             let x = t % 6.0;
-            0.1 + 0.6 * (bump(x, 0.35) + bump(x - 0.5, 0.35))
+            0.15 + 0.85 * (bump(x, 0.35) + bump(x - 0.5, 0.35))
         }
         Pattern::Blink => {
             if t % 1.0 < 0.5 {
@@ -304,10 +305,11 @@ impl Pwm {
         None
     }
 
-    /// Perceptual 0–1 → duty (gamma 2.2), in steps of 1/1000 so tiny changes aren't written.
+    /// Perceptual 0–1 → duty (gamma 2.2, like case-ring-breathe), in steps of 1/10 000 of the
+    /// period: fine enough that the dim end of a fade doesn't visibly step.
     pub fn duty_for(&self, level: f32) -> u64 {
-        let lin = level.clamp(0.0, 1.0).powf(2.2);
-        (lin * 1000.0).round() as u64 * self.period / 1000
+        let lin = level.clamp(0.0, 1.0).powf(2.2) as f64;
+        (lin * 10_000.0).round() as u64 * self.period / 10_000
     }
 
     fn write(&self, duty: u64) -> std::io::Result<()> {
@@ -337,9 +339,9 @@ pub fn spawn(device: Option<String>, channel: u32, state: Shared) {
                     }
                     last = Some(duty);
                 }
-                // 25 writes a second at most while it moves; a lazy check when it's still
+                // ~33 writes a second at most while it moves; a lazy check when it's still
                 std::thread::sleep(if animating(&s, now) {
-                    Duration::from_millis(40)
+                    Duration::from_millis(30)
                 } else {
                     Duration::from_millis(250)
                 });
@@ -369,32 +371,38 @@ mod tests {
     }
 
     #[test]
-    fn good_breathes_low_and_slow() {
-        let s = st(Status::Good);
-        let max = BRIGHTNESS[1].1;
-        assert!((at(&s, 0.0) - 0.04 * max).abs() < 1e-3);
-        assert!((at(&s, 4.0) - 0.30 * max).abs() < 1e-3);
-        assert!((at(&s, 8.0) - 0.04 * max).abs() < 1e-3);
+    fn good_breathes_like_the_old_script() {
+        let s = st(Status::Good); // default brightness: High
+        assert!((at(&s, 0.0) - 0.05).abs() < 1e-3);
+        assert!((at(&s, 2.0) - 1.0).abs() < 1e-3);
+        assert!((at(&s, 4.0) - 0.05).abs() < 1e-3);
+        let p = Pwm {
+            duty: PathBuf::new(),
+            period: 1_000_000,
+        };
+        // the old script's numbers: 0.05^2.2 and full
+        assert_eq!(p.duty_for(0.05), 1_400);
+        assert_eq!(p.duty_for(1.0), 1_000_000);
     }
 
     #[test]
     fn down_blinks_for_a_minute_then_nudges() {
         let s = st(Status::Down);
-        let max = BRIGHTNESS[1].1;
+        let max = BRIGHTNESS[2].1;
         assert_eq!(at(&s, 0.2), max);
         assert_eq!(at(&s, 0.7), 0.0);
-        // after a minute: the double pulse's floor (10 %) between bumps
-        assert!((at(&s, 62.0 + 3.0) - 0.1 * max).abs() < 1e-3);
+        // after a minute: the double pulse's floor (15 %) between bumps
+        assert!((at(&s, 62.0 + 3.0) - 0.15 * max).abs() < 1e-3);
     }
 
     #[test]
     fn hold_and_flashes_win() {
         let mut s = st(Status::Good);
         s.hold = Some(0.5);
-        assert!((at(&s, 1.0) - 0.5 * BRIGHTNESS[1].1).abs() < 1e-3);
+        assert!((at(&s, 1.0) - 0.5 * BRIGHTNESS[2].1).abs() < 1e-3);
         s.hold = None;
         s.fired = Some(s.since);
-        assert_eq!(at(&s, 0.05), BRIGHTNESS[1].1);
+        assert_eq!(at(&s, 0.05), BRIGHTNESS[2].1);
         assert_eq!(at(&s, 0.2), 0.0);
     }
 
@@ -403,7 +411,7 @@ mod tests {
         let mut s = st(Status::Good);
         s.settings.good = Pattern::Off;
         s.preview = Some((Role::Down, Pattern::Steady, s.since));
-        assert_eq!(at(&s, 1.0), BRIGHTNESS[1].1);
+        assert_eq!(at(&s, 1.0), BRIGHTNESS[2].1);
         assert_eq!(at(&s, 7.0), 0.0);
     }
 
@@ -431,7 +439,7 @@ mod tests {
         s.status = Status::Down;
         assert_eq!(at(&s, 0.2), BRIGHTNESS[0].1);
         s.night = Some(NightRing::AsDay);
-        assert_eq!(at(&s, 0.2), BRIGHTNESS[1].1);
+        assert_eq!(at(&s, 0.2), BRIGHTNESS[2].1);
         // shutting down: the ring is the share of containers still running
         s.shutdown = Some(0.25);
         assert_eq!(at(&s, 0.2), 0.25);
@@ -462,6 +470,6 @@ mod tests {
         };
         assert_eq!(p.duty_for(0.0), 0);
         assert_eq!(p.duty_for(1.0), 1_000_000);
-        assert_eq!(p.duty_for(0.5), 218_000); // 0.5^2.2 ≈ 0.218
+        assert_eq!(p.duty_for(0.5), 217_600); // 0.5^2.2 ≈ 0.2176
     }
 }
