@@ -63,6 +63,8 @@ pub enum Nav {
     Services,
     /// a page of the open paged screen (History, Services)
     Page(usize),
+    /// a Services tab: 0 Apps, 1 Host, 2 Web
+    Tab(u8),
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),

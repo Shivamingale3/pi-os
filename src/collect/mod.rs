@@ -22,7 +22,12 @@ pub struct Collector {
     prev_at: Instant,
     temp_sensor: Option<PathBuf>,
     docker_socket: PathBuf,
+    /// /etc/pios/checks, re-read every minute (edits apply without a restart)
+    checks: crate::checks::Config,
+    checks_at: Option<Instant>,
 }
+
+const CHECKS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Collector {
     /// Takes the baseline counters. The first `collect` should come about a second later.
@@ -33,6 +38,8 @@ impl Collector {
             prev_at: Instant::now(),
             temp_sensor: cpu::find_temp_sensor(),
             docker_socket,
+            checks: crate::checks::Config::default(),
+            checks_at: None,
         })
     }
 
@@ -48,8 +55,13 @@ impl Collector {
         self.prev_net = net;
         self.prev_at = now;
 
+        if self.checks_at.is_none_or(|t| t.elapsed() >= CHECKS_EVERY) {
+            self.checks = crate::checks::load(&crate::checks::path());
+            self.checks_at = Some(now);
+        }
+        let ts = now_ms();
         Ok(Snapshot {
-            ts: now_ms(),
+            ts,
             host: host::read()?,
             cpu: Cpu {
                 percent,
@@ -59,6 +71,8 @@ impl Collector {
             disk: disk::read("/")?,
             network,
             docker: docker::read(&self.docker_socket, DOCKER_TIMEOUT).ok(),
+            units: crate::checks::units(&self.checks),
+            web: crate::checks::web(&self.checks, &crate::checks::web_out(), ts),
         })
     }
 }

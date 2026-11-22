@@ -74,6 +74,8 @@ fn format_tm(h: i32, m: i32, wday: i32, mday: i32, mon: i32) -> (String, String)
 struct IncidentRow {
     kind: String,
     title: String,
+    #[serde(default)]
+    severity: String,
     #[serde(rename = "endedAt")]
     ended_at: Option<i64>,
 }
@@ -135,6 +137,7 @@ pub fn fetch(socket: &Path) -> Data {
                 .map(|i| OpenIncident {
                     kind: i.kind,
                     title: i.title,
+                    severity: i.severity,
                 })
                 .collect()
         })
@@ -204,6 +207,79 @@ pub fn sample_snapshot(
                 })
                 .collect(),
         }),
+        units: Some(sample_units(&[])),
+        web: Some(sample_web(&[])),
+    }
+}
+
+/// The samples' host services (generic names); `stopped` aren't running.
+pub const SAMPLE_UNITS: [&str; 8] = [
+    "docker",
+    "nginx",
+    "cloudflared",
+    "tailscaled",
+    "ssh",
+    "monitor",
+    "redis-cache",
+    "redis-queue",
+];
+
+pub fn sample_units(stopped: &[&str]) -> crate::types::Units {
+    let units: Vec<crate::types::Unit> = SAMPLE_UNITS
+        .iter()
+        .map(|n| crate::types::Unit {
+            name: n.to_string(),
+            running: !stopped.contains(n),
+        })
+        .collect();
+    crate::types::Units {
+        running: units.iter().filter(|u| u.running).count() as u32,
+        total: units.len() as u32,
+        units,
+    }
+}
+
+/// The samples' public hostnames: (host, expected code, answered code, ms).
+pub const SAMPLE_WEB: [(&str, u16, u16, u32); 10] = [
+    ("status.example.com", 200, 200, 1080),
+    ("drive.example.com", 302, 302, 1500),
+    ("vault.example.com", 200, 200, 970),
+    ("hub.example.com", 200, 200, 180),
+    ("bot.example.com", 200, 200, 420),
+    ("cron.example.com", 200, 200, 610),
+    ("s3.example.com", 403, 403, 310),
+    ("s3-panel.example.com", 200, 200, 520),
+    ("hook.example.com", 404, 404, 260),
+    ("logs.example.com", 200, 200, 330),
+];
+
+/// `failing`: (host, answered code or None = no answer), failed twice already.
+pub fn sample_web(failing: &[(&str, Option<u16>)]) -> crate::types::Web {
+    let checks: Vec<crate::types::WebCheck> = SAMPLE_WEB
+        .iter()
+        .map(|&(host, expect, code, ms)| {
+            let f = failing.iter().find(|f| f.0 == host);
+            let code = f.map_or(Some(code), |f| f.1);
+            let ok = code == Some(expect);
+            crate::types::WebCheck {
+                host: host.into(),
+                expect,
+                code,
+                ms: code.map(|_| ms),
+                error: code
+                    .is_none()
+                    .then(|| "Operation timed out after 10001 milliseconds".into()),
+                ok,
+                fails: if ok { 0 } else { 2 },
+            }
+        })
+        .collect();
+    crate::types::Web {
+        ok: checks.iter().filter(|c| c.ok).count() as u32,
+        total: checks.len() as u32,
+        checked_at: samples::NOW_MS - 20_000,
+        every_sec: 60,
+        checks,
     }
 }
 
@@ -214,6 +290,7 @@ pub fn sample(name: &str) -> Option<Data> {
     let incident = |kind: &str, title: &str| OpenIncident {
         kind: kind.into(),
         title: title.into(),
+        severity: "critical".into(),
     };
     let trends = |d: Data| Data {
         cpu_trend: CPU_TREND.to_vec(),
@@ -292,6 +369,7 @@ struct Args {
     preview: bool,
     sample: Option<String>,
     screen: app::Screen,
+    tab: screens::Tab,
     check: bool,
     scale: usize,
 }
@@ -304,6 +382,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
         preview: false,
         sample: None,
         screen: app::Screen::Home,
+        tab: screens::Tab::Apps,
         check: false,
         scale: 2,
     };
@@ -328,6 +407,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
                         app::SCREENS.join(", ")
                     ))
                 })?;
+                a.tab = app::tab_for(&s);
             }
             "--check" => a.check = true,
             "--scale" => {
@@ -395,11 +475,12 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
         let mut bad = 0;
         for n in &names {
             for s in app::SCREENS {
-                let ap = make_app(
+                let mut ap = make_app(
                     Some(n),
                     app::Screen::parse(s).expect("known screen"),
                     socket,
                 )?;
+                ap.tab = app::tab_for(s);
                 let v = layout::check(&tree_for(&ap, &fonts));
                 println!(
                     "{n} · {s}: {}",
@@ -421,7 +502,9 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
     }
 
     if let Some(path) = &a.png {
-        let ap = make_app(a.sample.as_deref(), a.screen, socket)?;
+        let mut ap = make_app(a.sample.as_deref(), a.screen, socket)?;
+        ap.tab = a.tab;
+        ap.tab = a.tab;
         let c = panel::frame(&tree_for(&ap, &fonts), &fonts, None);
         c.pm.save_png(path)
             .map_err(|e| err(format!("{}: {e}", path.display())))?;
@@ -621,21 +704,25 @@ mod tests {
             vec![OpenIncident {
                 kind: "metric".into(),
                 title: "CPU over 80%".into(),
+                severity: "critical".into(),
             }],
             vec![
                 OpenIncident {
                     kind: "container".into(),
                     title: "an-extremely-long-container-name-that-never-ends stopped".into(),
+                    severity: "critical".into(),
                 },
                 OpenIncident {
                     kind: "metric".into(),
                     title: "Disk over 85%".into(),
+                    severity: "critical".into(),
                 },
             ],
             (0..12)
                 .map(|i| OpenIncident {
                     kind: "metric".into(),
                     title: format!("problem {i}"),
+                    severity: "critical".into(),
                 })
                 .collect(),
         ];
@@ -690,6 +777,50 @@ mod tests {
             (theme::Status::Down, "1 is down")
         );
         assert_eq!(b("waiting").status, theme::Status::Unknown);
-        assert_eq!(b("good").line2, "9 of 9 checks passing");
+        assert_eq!(b("good").line2, "27 of 27 checks passing");
+        let g = b("good");
+        assert_eq!(g.groups[1].value.as_deref(), Some("8/8"));
+        assert_eq!(g.groups[2].value.as_deref(), Some("10/10"));
+
+        // a host service stopped, no incident yet: amber, said in words
+        let mut d = sample("good").unwrap();
+        d.snapshot.as_mut().unwrap().units = Some(sample_units(&["nginx"]));
+        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        assert_eq!(
+            (h.status, h.line2.as_str()),
+            (theme::Status::Attention, "1 host service not running")
+        );
+        assert_eq!(h.groups[1].value.as_deref(), Some("7/8"));
+        // …once its incident is open: red
+        d.open = vec![OpenIncident {
+            kind: "unit".into(),
+            title: "nginx stopped".into(),
+            severity: "critical".into(),
+        }];
+        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        assert_eq!(
+            (h.status, h.headline.as_str()),
+            (theme::Status::Down, "1 is down")
+        );
+        assert_eq!(h.groups[1].status, theme::Status::Down);
+
+        // a website answering an unexpected code: a warn incident → amber
+        let mut d = sample("good").unwrap();
+        d.snapshot.as_mut().unwrap().web = Some(sample_web(&[("drive.example.com", Some(200))]));
+        d.open = vec![OpenIncident {
+            kind: "web".into(),
+            title: "drive.example.com answers 200".into(),
+            severity: "warn".into(),
+        }];
+        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        assert_eq!(h.status, theme::Status::Attention);
+        assert_eq!(h.groups[2].value.as_deref(), Some("9/10"));
+        // nothing set up: "—"
+        let mut d = sample("good").unwrap();
+        let s = d.snapshot.as_mut().unwrap();
+        (s.units, s.web) = (None, None);
+        let h = Home::build(&d, "12:04", "Wed 18 Nov");
+        assert_eq!(h.groups[1].value, None);
+        assert_eq!(h.line2, "9 of 9 checks passing");
     }
 }

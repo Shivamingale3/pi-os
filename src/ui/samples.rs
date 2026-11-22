@@ -411,7 +411,42 @@ fn svc(
         mem_limit: (n == 2).then_some(512 * MB),
         up_sec: running.then_some(up_min * 60),
         restart: None,
+        host: false,
+        tasks: None,
     }
+}
+
+/// The samples' host services as the Host tab gets them (`stopped` aren't running).
+fn host_services(stopped: &[&str], long: bool) -> Vec<Service> {
+    let mem = [259, 9, 55, 58, 13, 159, 7, 8];
+    super::SAMPLE_UNITS
+        .iter()
+        .zip(mem)
+        .map(|(n, m)| {
+            let running = !stopped.contains(n);
+            let name = if long {
+                format!("{n}-with-an-extremely-long-unit-name-for-testing")
+            } else {
+                n.to_string()
+            };
+            Service {
+                id: crate::services::host_id(&name),
+                state: if running { "running" } else { "stopped" }.into(),
+                host: true,
+                image: if running {
+                    n.split('-').next().unwrap_or(n).into()
+                } else {
+                    String::new()
+                },
+                cpu: running.then_some(0.3),
+                mem: running.then_some(if long { 999 * GB * 1024 } else { m * MB }),
+                up_sec: running.then_some(if long { 999 * 86400 } else { 248 * 60 }),
+                tasks: running.then_some(if long { 99_999 } else { 4 }),
+                name,
+                ..Service::default()
+            }
+        })
+        .collect()
 }
 
 /// The good sample's 9 containers (Home: 9 of 9 running). `stopped`: this one has exited.
@@ -515,6 +550,8 @@ fn good_services(stopped: Option<&str>) -> Services {
     Services {
         reachable: true,
         services: v,
+        host: host_services(&[], false),
+        web: Some(super::sample_web(&[])),
     }
 }
 
@@ -555,10 +592,30 @@ fn worst_services() -> Services {
             s
         })
         .collect();
+    let mut web = super::sample_web(&[]);
+    for (i, c) in web.checks.iter_mut().enumerate() {
+        c.host = format!("a-very-long-public-hostname-number-{i}.with.many.subdomains.example.com");
+        if i % 3 == 0 {
+            (c.code, c.ms, c.ok, c.fails) = (None, None, false, 99);
+            c.error = Some("Could not resolve host: a very long error message from curl".into());
+        } else if i % 3 == 1 {
+            (c.code, c.ok, c.fails, c.ms) = (Some(599), false, 2, Some(9_999_999));
+        }
+    }
     Services {
         reachable: true,
         services,
+        host: host_services(&["docker", "ssh", "redis-queue"], true),
+        web: Some(web),
     }
+}
+
+/// `sample_app` for a screen name from `SCREENS` (`host` and `web` pick the Services tab).
+#[cfg(test)]
+pub fn sample_named(sample: &str, screen: &str) -> Option<App> {
+    let mut a = sample_app(sample, Screen::parse(screen)?)?;
+    a.tab = super::app::tab_for(screen);
+    Some(a)
 }
 
 /// An app showing `screen` with the named sample (good, attention, down, waiting, worst).
@@ -665,7 +722,7 @@ mod tests {
         let mut failures = vec![];
         for sample in super::super::SAMPLES {
             for s in SCREENS {
-                let a = sample_app(sample, Screen::parse(s).unwrap()).unwrap();
+                let a = sample_named(sample, s).unwrap();
                 let t = tree(&a, &f);
                 let v = layout::check(&t);
                 assert!(v.is_empty(), "{sample} · {s}: {v:#?}");
@@ -903,6 +960,88 @@ mod tests {
             assert!(layout::check(&tree(&a, &f)).is_empty());
         }
         assert!(n > 200, "{n}");
+    }
+
+    #[test]
+    fn host_and_web_never_collide() {
+        use crate::ui::screens::{Tab, WEB_ROWS};
+        let f = Fonts::load();
+        let mut n = 0;
+        for base in ["good", "down", "worst"] {
+            let all = sample_app(base, Screen::Services)
+                .unwrap()
+                .services
+                .unwrap();
+            // Host tab: every count, every page; each one's detail screen
+            for count in 0..=all.host.len() {
+                let mut a = sample_app(base, Screen::Services).unwrap();
+                a.tab = Tab::Host;
+                a.services.as_mut().unwrap().host.truncate(count);
+                for p in 0..3 {
+                    a.page = p;
+                    let v = layout::check(&tree(&a, &f));
+                    assert!(v.is_empty(), "{base} host n={count} page={p}: {v:#?}");
+                    n += 1;
+                }
+            }
+            for s in &all.host {
+                let mut a = sample_app(base, Screen::Services).unwrap();
+                a.tab = Tab::Host;
+                a.go(Nav::Container(key(&s.id)));
+                let t = tree(&a, &f);
+                assert!(layout::check(&t).is_empty(), "{base} host {}", s.name);
+                assert!(
+                    !t.items.iter().any(|i| i.name == "restart"),
+                    "no Restart for host services"
+                );
+                n += 1;
+            }
+            // Web tab: every count, every page, and nothing set up
+            let web = all.web.clone().unwrap();
+            for count in 0..=web.checks.len() {
+                let mut a = sample_app(base, Screen::Services).unwrap();
+                a.tab = Tab::Web;
+                let mut w = web.clone();
+                w.checks.truncate(count);
+                a.services.as_mut().unwrap().web = (count > 0).then_some(w);
+                for p in 0..=count.div_ceil(WEB_ROWS) {
+                    a.page = p;
+                    let v = layout::check(&tree(&a, &f));
+                    assert!(v.is_empty(), "{base} web n={count} page={p}: {v:#?}");
+                    n += 1;
+                }
+            }
+        }
+        assert!(n > 60, "{n}");
+    }
+
+    #[test]
+    fn tabs_switch_and_back_keeps_the_tab() {
+        use crate::ui::screens::Tab;
+        let f = Fonts::load();
+        let tap = |a: &mut App, name: &str| {
+            let t = tree(a, &f);
+            let (x, y) = panel::centre(&t, name);
+            let nav = t.items[panel::hit(&t, x, y).unwrap()].nav.unwrap();
+            a.go(nav);
+        };
+        let mut a = sample_app("good", Screen::Home).unwrap();
+        a.go(Nav::Services);
+        assert_eq!(a.tab, Tab::Apps, "nothing wrong: opens on Apps");
+        tap(&mut a, "Host");
+        assert_eq!((a.screen(), a.tab), (Screen::Services, Tab::Host));
+        tap(&mut a, "service");
+        assert!(a.open_container().is_some_and(|s| s.host));
+        tap(&mut a, "back");
+        assert_eq!((a.screen(), a.tab), (Screen::Services, Tab::Host));
+        tap(&mut a, "Web");
+        assert_eq!(a.tab, Tab::Web);
+        // a website failing: Services opens on Web
+        let mut a = sample_app("good", Screen::Home).unwrap();
+        a.home.snapshot.as_mut().unwrap().web =
+            Some(super::super::sample_web(&[("logs.example.com", None)]));
+        a.go(Nav::Services);
+        assert_eq!(a.tab, Tab::Web);
     }
 
     #[test]

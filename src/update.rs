@@ -117,6 +117,12 @@ pub fn summary(now_json: &str) -> String {
         Some(d) => format!("docker {}/{}", d.running, d.total),
         None => "docker unreachable".into(),
     });
+    if let Some(u) = &s.units {
+        parts.push(format!("host {}/{}", u.running, u.total));
+    }
+    if let Some(w) = &s.web {
+        parts.push(format!("web {}/{}", w.ok, w.total));
+    }
     parts.join(" · ")
 }
 

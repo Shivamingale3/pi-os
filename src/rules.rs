@@ -96,6 +96,10 @@ pub enum Kind {
     Metric,
     Container,
     Docker,
+    /// a host service (`host` line)
+    Unit,
+    /// a public hostname (`web` line)
+    Web,
 }
 
 impl Kind {
@@ -104,6 +108,8 @@ impl Kind {
             Kind::Metric => "metric",
             Kind::Container => "container",
             Kind::Docker => "docker",
+            Kind::Unit => "unit",
+            Kind::Web => "web",
         }
     }
 }
@@ -306,6 +312,33 @@ impl Engine {
             }
             None => {}
         }
+
+        for u in s.units.iter().flat_map(|u| &u.units) {
+            out.push(flag(
+                format!("unit:{}", u.name),
+                Kind::Unit,
+                u.name.clone(),
+                format!("{} stopped", u.name),
+                !u.running,
+            ));
+        }
+        // a hostname is bad after 2 failed checks in a row (one check a minute)
+        for c in s.web.iter().flat_map(|w| &w.checks) {
+            let mut cond = flag(
+                format!("web:{}", c.host),
+                Kind::Web,
+                c.host.clone(),
+                match c.code {
+                    Some(code) => format!("{} answers {code}", c.host),
+                    None => format!("{} not answering", c.host),
+                },
+                !c.ok && c.fails >= 2,
+            );
+            if !c.down() {
+                cond.severity = Severity::Warn;
+            }
+            out.push(cond);
+        }
         out
     }
 
@@ -457,6 +490,8 @@ pub mod tests {
             },
             network: Network { interfaces: vec![] },
             docker: None,
+            units: None,
+            web: None,
         }
     }
 
