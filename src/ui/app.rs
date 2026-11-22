@@ -10,6 +10,7 @@ use super::home::{Data, Home};
 use super::layout::{Nav, Tree};
 use super::screens::{self, Incident, IncidentFull};
 use crate::details::{CpuDetails, DiskDetails, MemDetails, TempDetails};
+use crate::services::{Service, Services, key};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -20,6 +21,8 @@ pub enum Screen {
     Disk,
     History,
     Incident(i64),
+    Services,
+    Container(u64),
 }
 
 impl Screen {
@@ -32,16 +35,26 @@ impl Screen {
             "disk" => Screen::Disk,
             "history" => Screen::History,
             "incident" => Screen::Incident(1),
+            "services" => Screen::Services,
+            "container" => Screen::Container(0),
             _ => return None,
         })
     }
 }
 
-pub const SCREENS: [&str; 7] = [
-    "home", "cpu", "temps", "memory", "disk", "history", "incident",
+pub const SCREENS: [&str; 9] = [
+    "home",
+    "cpu",
+    "temps",
+    "memory",
+    "disk",
+    "history",
+    "incident",
+    "services",
+    "container",
 ];
 
-/// I/O sparkline length (one point per Disk refresh).
+/// Sparkline length (one point per refresh: Disk I/O, a container's CPU and memory).
 const IO_POINTS: usize = 12;
 /// 24 h graphs are drawn from this many averaged buckets (15 min each).
 const TREND_BUCKETS: usize = 96;
@@ -61,6 +74,10 @@ pub struct App {
     pub writes: VecDeque<f32>,
     pub incidents: Option<Vec<Incident>>,
     pub incident: Option<IncidentFull>,
+    pub services: Option<Services>,
+    /// the open container's CPU and memory, one point per refresh
+    pub svc_cpu: VecDeque<f32>,
+    pub svc_mem: VecDeque<f32>,
     last: HashMap<&'static str, Instant>,
     /// false for built-in samples: never fetch
     pub live: bool,
@@ -105,9 +122,23 @@ impl App {
                 self.page = 0;
                 Screen::History
             }
+            Nav::Services => {
+                self.page = 0;
+                Screen::Services
+            }
             Nav::Page(p) => {
                 self.page = p;
-                Screen::History
+                match self.screen() {
+                    Screen::Services => Screen::Services,
+                    _ => Screen::History,
+                }
+            }
+            Nav::Container(k) => {
+                if self.screen() != Screen::Container(k) {
+                    self.svc_cpu.clear();
+                    self.svc_mem.clear();
+                }
+                Screen::Container(k)
             }
             Nav::Incident(id) => {
                 if self.incident.as_ref().is_none_or(|i| i.incident.id != id) {
@@ -118,6 +149,7 @@ impl App {
             }
             Nav::Back => match self.screen() {
                 Screen::Incident(_) => Screen::History,
+                Screen::Container(_) => Screen::Services,
                 _ => Screen::Home,
             },
         };
@@ -152,6 +184,8 @@ impl App {
             Screen::Disk => v.push(("disk", s(3))),
             Screen::History => v.push(("incidents", s(10))),
             Screen::Incident(_) => v.push(("incident", s(10))),
+            Screen::Services => v.push(("services", s(5))),
+            Screen::Container(_) => v.push(("services", s(3))),
         }
         v
     }
@@ -199,6 +233,25 @@ impl App {
                         .ok()
                         .map(|l| l.incidents)
                 }
+                "services" => {
+                    self.services = super::get_json(socket, "/details/services").ok();
+                    if let Screen::Container(_) = self.screen()
+                        && let Some(c) = self.open_container()
+                    {
+                        let (cpu, mem) = (c.cpu, c.mem);
+                        for (q, v) in [
+                            (&mut self.svc_cpu, cpu),
+                            (&mut self.svc_mem, mem.map(|m| m as f64)),
+                        ] {
+                            if let Some(v) = v {
+                                q.push_back(v as f32);
+                                while q.len() > IO_POINTS {
+                                    q.pop_front();
+                                }
+                            }
+                        }
+                    }
+                }
                 "incident" => {
                     if let Screen::Incident(id) = self.screen() {
                         self.incident = super::get_json(socket, &format!("/incidents/{id}")).ok();
@@ -208,6 +261,18 @@ impl App {
             }
         }
         any
+    }
+
+    /// The container the open screen shows (None: not loaded yet, or it was removed).
+    pub fn open_container(&self) -> Option<&Service> {
+        let Screen::Container(k) = self.screen() else {
+            return None;
+        };
+        self.services
+            .as_ref()?
+            .services
+            .iter()
+            .find(|s| key(&s.id) == k)
     }
 
     /// How long until the next fetch is due.
@@ -244,6 +309,18 @@ impl App {
                 screens::history(f, self.incidents.as_deref(), self.page, now_ms, at)
             }
             Screen::Incident(_) => screens::incident(f, self.incident.as_ref(), now_ms, at),
+            Screen::Services => screens::services(f, self.services.as_ref(), self.page),
+            Screen::Container(_) => {
+                let cpu: Vec<f32> = self.svc_cpu.iter().copied().collect();
+                let mem: Vec<f32> = self.svc_mem.iter().copied().collect();
+                screens::container(
+                    f,
+                    self.open_container(),
+                    &cpu,
+                    &mem,
+                    self.services.is_some(),
+                )
+            }
         }
     }
 }

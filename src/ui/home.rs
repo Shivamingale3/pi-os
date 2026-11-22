@@ -385,7 +385,7 @@ impl Home {
                 border: Some(sc.border),
             },
         );
-        t.touch(h);
+        t.nav(h, Nav::Services);
         t.pad(h, PAD_CARD);
         let inner = hero.inset(PAD_CARD);
         let icon = Rect::new(inner.x, inner.cy() - 30.0, 60.0, 60.0);

@@ -25,6 +25,7 @@ mod helper;
 mod http;
 mod parse;
 mod rules;
+mod services;
 mod setup;
 mod signals;
 mod store;

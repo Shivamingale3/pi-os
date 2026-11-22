@@ -5,7 +5,7 @@
 //!   GET /trend?metric=NAME    last 24 h: {"metric", "points": [[ts, value], …]}
 //!   GET /incidents            last 7 days, newest first, without snapshots
 //!   GET /incidents/ID         one incident with its start / peak / end snapshots
-//!   GET /details/TILE         cpu · temps · memory · disk, collected on request (screen open)
+//!   GET /details/TILE         cpu · temps · memory · disk · services, collected on request (screen open)
 //!
 //! Try: curl --unix-socket data/pios.sock http://pios/now
 
@@ -117,7 +117,14 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
                 .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
             "disk" => crate::details::disk(&docker)
                 .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            _ => return (404, json!({"error": "details: cpu, temps, memory or disk"})),
+            "services" => crate::services::collect(&docker)
+                .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
+            _ => {
+                return (
+                    404,
+                    json!({"error": "details: cpu, temps, memory, disk or services"}),
+                );
+            }
         };
         return r
             .map(|v| (200, v))

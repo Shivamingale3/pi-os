@@ -431,21 +431,8 @@ pub fn selected_algo(text: &str) -> Option<String> {
 }
 
 fn cgroup_memory(id: &str) -> Option<u64> {
-    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    for p in [
-        format!("/sys/fs/cgroup/system.slice/docker-{id}.scope/memory.current"),
-        format!("/sys/fs/cgroup/docker/{id}/memory.current"),
-    ] {
-        if let Some(v) = std::fs::read_to_string(&p)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-        {
-            return Some(v);
-        }
-    }
-    None
+    let p = crate::services::cgroup_dir(id)?.join("memory.current");
+    std::fs::read_to_string(p).ok()?.trim().parse().ok()
 }
 
 fn top_processes_rss(n: usize) -> Vec<Usage> {
