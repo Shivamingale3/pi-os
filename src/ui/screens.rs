@@ -437,10 +437,7 @@ pub fn cpu(f: &Fonts, d: Option<&CpuDetails>, trend: &[f32]) -> Tree {
         return reading(&mut b, "CPU");
     };
     let n = d.cores.len();
-    b.header(
-        "CPU",
-        &format!("{n} {}", if n == 1 { "core" } else { "cores" }),
-    );
+    b.header("CPU", "");
 
     // total + load
     let (c, r) = b.card("total", Rect::new(M, TOP, 144.0, 120.0), "TOTAL", "");
@@ -485,7 +482,7 @@ pub fn cpu(f: &Fonts, d: Option<&CpuDetails>, trend: &[f32]) -> Tree {
     let (c, r) = b.card(
         "cores",
         Rect::new(M + 144.0 + GAP, TOP, WIDTH - 144.0 - GAP, 120.0),
-        "CORES",
+        &format!("{n} {}", if n == 1 { "CORE" } else { "CORES" }),
         &range,
     );
     let groups = n.div_ceil(4).max(1);
@@ -599,14 +596,7 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
     let Some(d) = d else {
         return reading(&mut b, "Temperatures");
     };
-    let fan_meta = match &d.fan {
-        Some(fan) if fan.step > 0 || fan.rpm.unwrap_or(0) > 0 => {
-            format!("fan on · {} rpm", fan.rpm.unwrap_or(0))
-        }
-        Some(fan) => format!("fan off · {} rpm", fan.rpm.unwrap_or(0)),
-        None => "no fan".into(),
-    };
-    b.header("Temperatures", &fan_meta);
+    b.header("Temperatures", "");
 
     let cpu_limit = THRESHOLDS
         .iter()
@@ -646,10 +636,8 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
         let hi = s.critical.or(limit).unwrap_or(90.0).max(s.celsius + 5.0);
         let lo = 20.0_f64.min(s.celsius - 5.0);
         let at = |v: f64| ((v - lo) / (hi - lo)) as f32;
+        // the fan's start temperature lives in the fan card only
         let mut marks = Vec::new();
-        if let Some(fo) = s.fan_on {
-            marks.push((at(fo), INK3));
-        }
         if let Some(l) = limit {
             marks.push((at(l), status_colors(Status::Attention).shape));
         }
@@ -665,11 +653,10 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                 marks,
             },
         );
-        let caption = match (s.fan_on, limit, s.critical) {
-            (Some(fo), Some(l), _) => format!("fan {fo:.0} · limit {l:.0}"),
-            (None, Some(l), Some(cr)) => format!("max {l:.0} · crit {cr:.0}"),
-            (None, Some(l), None) => format!("limit {l:.0}"),
-            (None, None, Some(cr)) => format!("critical {cr:.0}"),
+        let caption = match (limit, s.critical) {
+            (Some(l), Some(cr)) if cr > l => format!("limit {l:.0} · crit {cr:.0}"),
+            (Some(l), _) => format!("limit {l:.0}"),
+            (None, Some(cr)) => format!("critical {cr:.0}"),
             _ => "no limit reported".into(),
         };
         b.text(
@@ -683,19 +670,13 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
         x += w + GAP;
     }
 
-    let guide = d
-        .sensors
-        .iter()
-        .find(|s| s.name == "CPU")
-        .and_then(|s| s.fan_on)
-        .map(|v| v as f32);
     let (c, r) = b.card(
         "trend",
         Rect::new(M, TOP + 136.0, 304.0, 108.0),
         "CPU · LAST 24 H",
         &stats(trend, "°C"),
     );
-    b.chart(c, r, trend, 4.0, guide);
+    b.chart(c, r, trend, 4.0, None);
 
     let (c, r) = b.card(
         "fan",
@@ -761,16 +742,7 @@ pub fn memory(f: &Fonts, d: Option<&MemDetails>) -> Tree {
     let Some(d) = d else {
         return reading(&mut b, "Memory");
     };
-    let swap_meta = match &d.swap {
-        Some(s) => format!(
-            "{} · {} {}",
-            bytes_s(d.total),
-            s.kind.split(" · ").next().unwrap_or("swap"),
-            bytes_s(s.total)
-        ),
-        None => format!("{} · no swap", bytes_s(d.total)),
-    };
-    b.header("Memory", &swap_meta);
+    b.header("Memory", "");
 
     // headline + stacked bar + legend
     let (c, r) = b.card("usage", Rect::new(M, TOP, WIDTH, 92.0), "", "");
@@ -995,12 +967,7 @@ pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -
     let Some(d) = d else {
         return reading(&mut b, "Disk");
     };
-    let meta = d
-        .drive
-        .as_ref()
-        .map(|dr| format!("{} · {}", dr.kind, bytes_s(dr.size)))
-        .unwrap_or_default();
-    b.header("Disk", &meta);
+    b.header("Disk", "");
 
     // root + one more filesystem
     let root = d.filesystems.first();
@@ -1016,11 +983,7 @@ pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -
     let (c, r) = b.card("root", Rect::new(M, TOP, 304.0, 116.0), &lab, "");
     match root {
         Some(fs) => {
-            let pct = if fs.size > 0 {
-                fs.used as f64 * 100.0 / fs.size as f64
-            } else {
-                0.0
-            };
+            let pct = fs.percent;
             let p = format!("{pct:.0}%");
             let pw = f.width(&mono(), &p);
             let (n, _) = bytes(fs.used);
@@ -1083,11 +1046,12 @@ pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -
     }
 
     // drive
+    // (its temperature is on the Temperatures screen)
     let (c, r) = b.card(
         "drive",
         Rect::new(M + 304.0 + GAP, TOP, WIDTH - 304.0 - GAP, 116.0),
         "DRIVE",
-        "",
+        d.drive.as_ref().map_or("", |dr| dr.kind.as_str()),
     );
     match &d.drive {
         Some(dr) => {
@@ -1095,29 +1059,26 @@ pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -
                 c,
                 "model",
                 Rect::new(r.x, r.y, r.w, 16.0),
-                &dr.model,
-                mono(),
+                &format!("{} · {}", bytes_s(dr.size), dr.model),
+                body(),
+                INK2,
+            );
+            let (n, u) = bytes(dr.written);
+            b.value(
+                c,
+                "written",
+                Rect::new(r.x, r.y + 16.0 + MIN_GAP, r.w, 28.0),
+                &n,
+                &u,
                 INK,
             );
             b.text(
                 c,
-                "size",
-                Rect::new(r.x, r.y + 16.0 + MIN_GAP, r.w, 16.0),
-                &format!("{} · {}", bytes_s(dr.size), dr.kind),
-                body(),
-                INK2,
-            );
-            let (v, u) = dr
-                .celsius
-                .map(|t| (format!("{t:.0}"), "°C"))
-                .unwrap_or(("—".into(), ""));
-            b.value(
-                c,
-                "temp",
-                Rect::new(r.x, r.y + 2.0 * (16.0 + MIN_GAP), r.w, 28.0),
-                &v,
-                u,
-                INK,
+                "caption",
+                Rect::new(r.x, r.y + 16.0 + MIN_GAP + 28.0 + MIN_GAP, r.w, 16.0),
+                "written since boot",
+                small(),
+                INK3,
             );
         }
         None => b.note(c, r, "Unknown drive"),

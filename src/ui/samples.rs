@@ -36,33 +36,33 @@ fn usage(name: &str, value: f64) -> Usage {
 
 fn good_cpu() -> CpuDetails {
     CpuDetails {
-        percent: 1.3,
+        percent: 7.0,
         cores: vec![
             Core {
-                percent: 2.0,
+                percent: 9.0,
                 mhz: 2000,
             },
             Core {
-                percent: 0.0,
+                percent: 5.0,
                 mhz: 2000,
             },
             Core {
-                percent: 2.0,
+                percent: 8.0,
                 mhz: 1900,
             },
             Core {
-                percent: 1.0,
+                percent: 6.0,
                 mhz: 2000,
             },
         ],
-        load: [0.06, 0.07, 0.05],
+        load: [0.08, 0.06, 0.01],
         min_mhz: 1500,
         max_mhz: 2400,
         governor: "ondemand".into(),
         top: vec![
-            usage("database", 1.2),
-            usage("java", 0.5),
-            usage("dockerd", 0.3),
+            usage("database", 3.1),
+            usage("java", 1.6),
+            usage("dockerd", 0.8),
         ],
     }
 }
@@ -72,7 +72,7 @@ fn good_temps() -> TempDetails {
         sensors: vec![
             Sensor {
                 name: "CPU".into(),
-                celsius: 43.0,
+                celsius: 37.0,
                 fan_on: Some(50.0),
                 limit: None,
                 critical: None,
@@ -132,18 +132,20 @@ fn good_disk() -> DiskDetails {
                 mount: "/".into(),
                 used: 54_815_719_424,
                 size: 503_460_380_672,
+                percent: 12.0,
             },
             Fs {
                 mount: "/boot/firmware".into(),
                 used: 68_063_232,
                 size: 528_592_896,
+                percent: 12.9,
             },
         ],
         drive: Some(Drive {
             model: "SAMPLE NVME 512G".into(),
             size: 512_110_190_592,
             kind: "NVMe".into(),
-            celsius: Some(52.85),
+            written: 38_654_705_664,
         }),
         read_bps: 0.0,
         write_bps: 200_704.0,
@@ -195,7 +197,7 @@ fn good_incidents() -> Vec<Incident> {
             "CPU over 80%",
             "critical",
             65,
-            None,
+            Some(6),
             Some(97.0),
         ),
         incident(
@@ -233,21 +235,25 @@ fn good_incidents() -> Vec<Incident> {
 
 fn full(i: Incident, data: &Data, ended: bool) -> IncidentFull {
     let s = data.snapshot.clone();
-    let mut peak = s.clone();
-    if let Some(p) = peak.as_mut() {
-        p.cpu.percent = 97.0;
-        p.ts = i.peak_at.unwrap_or(i.started_at);
-    }
-    let mut start = s.clone();
-    if let Some(st) = start.as_mut() {
-        st.cpu.percent = 84.0;
-        st.ts = i.started_at;
-    }
-    let end = if ended {
-        s.map(|mut e| {
-            e.ts = i.ended_at.unwrap_or(NOW_MS);
-            e
+    let peak_v = i.peak_value.unwrap_or(90.0);
+    let at = |ts: i64, v: f64| {
+        s.clone().map(|mut x| {
+            x.ts = ts;
+            match i.subject.as_str() {
+                "cpu.percent" => x.cpu.percent = v,
+                "cpu.tempC" => x.cpu.temp_c = Some(v),
+                "mem.usedPercent" => x.memory.used_percent = v,
+                "disk.usedPercent" => x.disk.used_percent = v,
+                _ => {}
+            }
+            x
         })
+    };
+    let start = at(i.started_at, peak_v - 2.0);
+    let peak = at(i.peak_at.unwrap_or(i.started_at), peak_v);
+    let end = if ended {
+        // recovered: back below warn − 5
+        at(i.ended_at.unwrap_or(NOW_MS), peak_v - 12.0)
     } else {
         None
     };
@@ -330,18 +336,20 @@ fn worst_disk() -> DiskDetails {
                 mount: "/".into(),
                 used: 999 * GB * 1024 * 1024,
                 size: 1000 * GB * 1024 * 1024,
+                percent: 99.9,
             },
             Fs {
                 mount: "/mnt/a-very-long-mount-point-name/with/many/levels".into(),
                 used: 900 * GB * 1024,
                 size: 999 * GB * 1024,
+                percent: 90.1,
             },
         ],
         drive: Some(Drive {
             model: "A VERY LONG DRIVE MODEL NAME WITH MANY WORDS 8TB".into(),
             size: 8000 * GB,
             kind: "SD card".into(),
-            celsius: Some(109.0),
+            written: 999 * GB * 1024 * 1024,
         }),
         read_bps: 9.9e12,
         write_bps: 9.9e12,
@@ -404,7 +412,7 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             a.mem = Some(good_mem());
             a.disk = Some(good_disk());
             a.cpu_trend = curve(96, 3.0, 1.5, 0.4, Some((60, 11.0)));
-            a.temp_trend = curve(96, 41.0, 2.2, 1.2, Some((60, 4.0)));
+            a.temp_trend = curve(96, 38.0, 1.0, 1.2, Some((60, 2.0)));
             a.reads = vec![
                 0.0, 0.0, 4096.0, 0.0, 0.0, 12288.0, 0.0, 0.0, 0.0, 4096.0, 0.0, 0.0,
             ]
