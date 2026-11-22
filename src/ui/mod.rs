@@ -1,15 +1,21 @@
-//! `pios ui`: draws the screens from the agent's API. For now Home only, to a PNG or a laptop
-//! preview window; the panel output (framebuffer + touch) comes in a later milestone.
+//! `pios ui`: draws the screens from the agent's API. For now Home only.
 //!
+//!   pios ui --fb /dev/fb0 [--touch DEV]  the real panel (pios-ui.service); see panel.rs
 //!   pios ui --png FILE           one frame from the running agent
-//!   pios ui --preview [--scale N] live window (laptop builds with `--features preview`)
+//!   pios ui --preview [--scale N] live window, mouse click = tap (laptop builds with `--features preview`)
 //!   pios ui --sample NAME ...    draw a built-in example instead (good, attention, down, waiting, worst)
 //!   pios ui --check ...          print any spacing-rule violation and exit 1 if there is one
+//!
+//! Panel settings (environment): PIOS_TOUCH_MATRIX (libinput calibration, 6 numbers),
+//! PIOS_BACKLIGHT (sysfs brightness file), PIOS_IDLE_MIN (screen off after, default 30).
 
 pub mod canvas;
+pub mod fb;
 pub mod home;
 pub mod layout;
+pub mod panel;
 pub mod theme;
+pub mod touch;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -245,6 +251,8 @@ pub fn sample(name: &str) -> Option<Data> {
 // ---------- command ----------
 
 struct Args {
+    fb: Option<PathBuf>,
+    touch: Option<PathBuf>,
     png: Option<PathBuf>,
     preview: bool,
     sample: Option<String>,
@@ -254,6 +262,8 @@ struct Args {
 
 fn parse_args(args: &[String]) -> Result<Args> {
     let mut a = Args {
+        fb: None,
+        touch: None,
         png: None,
         preview: false,
         sample: None,
@@ -264,6 +274,14 @@ fn parse_args(args: &[String]) -> Result<Args> {
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--png" => a.png = Some(it.next().ok_or_else(|| err("--png needs a file"))?.into()),
+            "--fb" => a.fb = Some(it.next().ok_or_else(|| err("--fb needs a device"))?.into()),
+            "--touch" => {
+                a.touch = Some(
+                    it.next()
+                        .ok_or_else(|| err("--touch needs a device"))?
+                        .into(),
+                )
+            }
             "--preview" => a.preview = true,
             "--sample" => {
                 a.sample = Some(
@@ -282,10 +300,9 @@ fn parse_args(args: &[String]) -> Result<Args> {
             other => return Err(err(format!("unknown option {other}"))),
         }
     }
-    if a.png.is_none() && !a.preview && !a.check {
+    if a.png.is_none() && !a.preview && !a.check && a.fb.is_none() {
         return Err(err(
-            "usage: pios ui [--sample NAME] [--png FILE | --preview [--scale N] | --check]\n\
-             (drawing on the panel comes in a later milestone)",
+            "usage: pios ui --fb DEV [--touch DEV] | [--sample NAME] [--png FILE | --preview [--scale N] | --check]",
         ));
     }
     Ok(a)
@@ -346,6 +363,30 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
     if a.preview {
         preview(&a, socket, &fonts)?;
     }
+
+    if let Some(fb) = &a.fb {
+        let calibration = match std::env::var("PIOS_TOUCH_MATRIX") {
+            Ok(m) if !m.trim().is_empty() => touch::Calibration::parse(&m)?,
+            _ => touch::Calibration::IDENTITY,
+        };
+        let idle_min: u64 = std::env::var("PIOS_IDLE_MIN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        panel::run(
+            panel::Options {
+                fb: fb.clone(),
+                touch: a.touch.clone(),
+                calibration,
+                backlight: std::env::var_os("PIOS_BACKLIGHT")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
+                idle: Duration::from_secs(idle_min.max(1) * 60),
+                socket: socket.to_path_buf(),
+            },
+            &fonts,
+        )?;
+    }
     Ok(())
 }
 
@@ -372,8 +413,10 @@ fn preview(a: &Args, socket: &Path, fonts: &Fonts) -> Result<()> {
     win.set_target_fps(10);
     let mut data = load_data(a.sample.as_deref(), socket)?;
     let mut fetched = Instant::now();
-    let mut shown = (String::new(), None::<Home>);
+    let mut shown: Option<(Home, Option<usize>)> = None;
     let mut buf = vec![0u32; (theme::W * theme::H) as usize];
+    let mut was_down = false;
+    let mut pressed: Option<(usize, Instant)> = None;
     while win.is_open() && !win.is_key_down(Key::Escape) {
         if a.sample.is_none() && fetched.elapsed() >= Duration::from_secs(5) {
             data = fetch(socket);
@@ -381,9 +424,25 @@ fn preview(a: &Args, socket: &Path, fonts: &Fonts) -> Result<()> {
         }
         let (time, date) = local_now();
         let home = Home::build(&data, &time, &date);
-        if shown.1.as_ref() != Some(&home) {
-            buf = draw(&home, fonts).xrgb();
-            shown = (time, Some(home));
+        let down = win.get_mouse_down(minifb::MouseButton::Left);
+        if down
+            && !was_down
+            && let Some((x, y)) = win.get_mouse_pos(minifb::MouseMode::Discard)
+        {
+            let tree = home.tree(fonts);
+            if let Some(i) = panel::hit(&tree, x, y) {
+                println!("tap {} at {x:.0},{y:.0}", tree.items[i].name);
+                pressed = Some((i, Instant::now() + panel::PRESS_SHOWN));
+            }
+        }
+        was_down = down;
+        if pressed.is_some_and(|(_, until)| Instant::now() >= until) {
+            pressed = None;
+        }
+        let p = pressed.map(|(i, _)| i);
+        if shown.as_ref() != Some(&(home.clone(), p)) {
+            buf = panel::frame(&home.tree(fonts), fonts, p).xrgb();
+            shown = Some((home, p));
         }
         win.update_with_buffer(&buf, theme::W as usize, theme::H as usize)
             .map_err(|e| err(format!("preview window: {e}")))?;
