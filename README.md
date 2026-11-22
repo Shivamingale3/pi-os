@@ -52,10 +52,32 @@ Trend metrics: `cpu.percent` · `cpu.tempC` · `mem.usedPercent` · `disk.usedPe
 | CPU %, RAM %, disk %, CPU °C | ≥ 80 · 85 · 85 · 75 (critical at ≥ 95 · 95 · 95 · 85) | below the threshold − 5 |
 | container | a container seen running in this run is no longer running | it's running again, or removed |
 | Docker | Docker was reachable in this run and no longer is | it's reachable again |
+| host service | a `host` service from `/etc/pios/checks` isn't running | it's running again |
+| website | a `web` hostname failed 2 checks in a row (warn: an unexpected code; critical: no answer or 5xx) | it answers the expected code |
 
 An incident **opens after 30 s** of the bad condition without a break, and **closes after 60 s**
 of the clear condition without a break, so short spikes and flapping are ignored. Start and end
 times are the first bad and first clear readings.
+
+## Host and web checks
+
+What to watch lives in one file on the Pi, `/etc/pios/checks`, never in this repo
+(`pios setup` installs a commented `checks.example` next to it). Both readers pick up edits
+within a minute.
+
+```text
+host nginx                    # a systemd service that should be running
+web status.example.com        # https://HOST/ should answer 200
+web s3.example.com 403        # …or the code given (redirects aren't followed)
+```
+
+- **Host services** are read from their cgroup (`/sys/fs/cgroup/system.slice/NAME.service`):
+  running, memory, CPU, uptime, main process. No D-Bus, no `systemctl`, no extra permissions.
+- **Websites** are fetched by `pios web` (`pios-web.service`) every 60 s with one
+  `curl --parallel`, from outside in (DNS, Cloudflare, the tunnel, the app). It is the only PiOS
+  process with network access, under its own throwaway user (`DynamicUser`); it writes
+  `/run/pios-web/web.json`, which the agent reads (results older than 3 minutes are ignored).
+  The agent itself stays on unix sockets only.
 
 ## Screen (in progress)
 
@@ -65,11 +87,13 @@ times are the first bad and first clear readings.
 frequency, load average, 24 h graph, busiest processes), **Temperatures** (every sensor with its
 limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, biggest users) and **Disk**
 (filesystems, the drive, live read/write, Docker disk usage). **History** lists the last 7 days of
-incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**:
-one tile per container, problems first (red: not running; amber: unhealthy, restarting or paused),
+incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**,
+on the first tab with a problem: **Apps · Host · Web**. Apps has one tile per container, problems first (red: not running; amber: unhealthy, restarting or paused),
 9 per page; a tile opens the container (state, uptime or exit code, CPU and memory with its limit,
 image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
-lifting or sliding away cancels, and a tap does nothing. Each screen has a 44 px back button.
+lifting or sliding away cancels, and a tap does nothing. **Host** has one tile per host service
+(its detail shows the unit, main process and tasks; no Restart). **Web** lists each hostname with
+its response time and HTTP code, problems first, 4 per page. Each screen has a 44 px back button.
 Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).
 
 Output goes to the panel (`--fb`), to a PNG, or to a laptop preview window, where a mouse click acts
@@ -108,6 +132,7 @@ binary and are installed by `pios setup`.
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
+| `pios-web.service` | throwaway (`DynamicUser`) | the website checks: one `curl --parallel` a minute, results in `/run/pios-web/`. The only unit with network access. `MemoryMax=48M`, `CPUQuota=10%`, read-only system |
 | `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
 `systemd-analyze security` rates the agent 1.0 ("OK"; it may read other processes' CPU use for the CPU screen), the helper 0.7 and the screen 0.8 ("SAFE").

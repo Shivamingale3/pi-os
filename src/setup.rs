@@ -10,7 +10,7 @@ use std::process::Command;
 use crate::error::{Result, err};
 
 /// Installed and enabled at boot.
-pub const UNITS: [(&str, &str); 3] = [
+pub const UNITS: [(&str, &str); 4] = [
     (
         "pios-agent.service",
         include_str!("../deploy/pios-agent.service"),
@@ -23,7 +23,15 @@ pub const UNITS: [(&str, &str); 3] = [
         "pios-helper.service",
         include_str!("../deploy/pios-helper.service"),
     ),
+    (
+        "pios-web.service",
+        include_str!("../deploy/pios-web.service"),
+    ),
 ];
+/// Host services and hostnames to watch: the real file is the user's, never shipped (the repo
+/// is public); setup only refreshes the commented example next to it.
+const CHECKS_DIR: &str = "/etc/pios";
+const CHECKS_EXAMPLE: &str = include_str!("../deploy/checks.example");
 /// Installed but never enabled or disabled by setup: the user decides when PiOS takes the panel.
 pub const UI_UNIT: (&str, &str) = ("pios-ui.service", include_str!("../deploy/pios-ui.service"));
 const SUDOERS: &str = include_str!("../deploy/sudoers-pios-deploy");
@@ -190,6 +198,14 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
         std::os::unix::fs::chown(&keys, Some(uid), Some(gid))?;
     }
 
+    fs::create_dir_all(CHECKS_DIR)?;
+    fs::set_permissions(CHECKS_DIR, fs::Permissions::from_mode(0o755))?;
+    write_if_changed(
+        &format!("{CHECKS_DIR}/checks.example"),
+        CHECKS_EXAMPLE,
+        0o644,
+    )?;
+
     if units_changed {
         run("systemctl", &["daemon-reload"])?;
     }
@@ -198,6 +214,8 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
         &["enable", "--quiet", "--now", "pios-helper.socket"],
     )?;
     run("systemctl", &["enable", "--quiet", "pios-agent.service"])?;
+    run("systemctl", &["enable", "--quiet", "pios-web.service"])?;
+    run("systemctl", &["restart", "pios-web.service"])?;
     run("systemctl", &["try-restart", "pios-helper.service"])?;
     run("systemctl", &["restart", "pios-agent.service"])?;
     println!("  pios-agent restarted");
@@ -215,6 +233,7 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
             "--quiet",
             "--now",
             "pios-ui.service",
+            "pios-web.service",
             "pios-agent.service",
             "pios-helper.socket",
         ],
@@ -225,6 +244,11 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
     }
     let _ = run("systemctl", &["daemon-reload"]);
     remove(SUDOERS_PATH);
+    remove(&format!("{CHECKS_DIR}/checks.example"));
+    if !keep_data {
+        remove(&format!("{CHECKS_DIR}/checks"));
+    }
+    let _ = fs::remove_dir(CHECKS_DIR); // only if empty
     if user_exists("pios-deploy") {
         let _ = run("userdel", &["--remove", "pios-deploy"]); // also removes its home and key
         println!("  removed user pios-deploy");
@@ -307,6 +331,29 @@ mod tests {
             );
         }
         assert!(UNITS[1].1.lines().any(|l| l == "SocketMode=0660"));
+        // the only unit with network: its own throwaway user, nothing else
+        let web = UNITS[3].1;
+        for line in [
+            "DynamicUser=yes",
+            "NoNewPrivileges=yes",
+            "CapabilityBoundingSet=",
+            "ProtectSystem=strict",
+            "MemoryMax=48M",
+            "CPUQuota=10%",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+        ] {
+            assert!(web.lines().any(|l| l == line), "web unit lacks {line}");
+        }
+        assert!(
+            !agent.contains("AF_INET"),
+            "the agent stays off the network"
+        );
+        // the example only: real hostnames never ship
+        assert!(
+            CHECKS_EXAMPLE
+                .lines()
+                .all(|l| l.starts_with('#') || l.trim().is_empty())
+        );
         let ui = UI_UNIT.1;
         for line in [
             "User=pios-ui",

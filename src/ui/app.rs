@@ -35,14 +35,23 @@ impl Screen {
             "disk" => Screen::Disk,
             "history" => Screen::History,
             "incident" => Screen::Incident(1),
-            "services" => Screen::Services,
+            "services" | "host" | "web" => Screen::Services,
             "container" => Screen::Container(0),
             _ => return None,
         })
     }
 }
 
-pub const SCREENS: [&str; 9] = [
+/// `--screen host` / `--screen web`: the Services screen on that tab.
+pub fn tab_for(name: &str) -> screens::Tab {
+    match name {
+        "host" => screens::Tab::Host,
+        "web" => screens::Tab::Web,
+        _ => screens::Tab::Apps,
+    }
+}
+
+pub const SCREENS: [&str; 11] = [
     "home",
     "cpu",
     "temps",
@@ -51,6 +60,8 @@ pub const SCREENS: [&str; 9] = [
     "history",
     "incident",
     "services",
+    "host",
+    "web",
     "container",
 ];
 
@@ -82,6 +93,8 @@ pub struct App {
     pub holding: Option<f32>,
     /// the agent refused the last restart request (container key, why)
     pub refused: Option<(u64, String)>,
+    /// the open Services tab
+    pub tab: screens::Tab,
     last: HashMap<&'static str, Instant>,
     /// false for built-in samples: never fetch
     pub live: bool,
@@ -128,6 +141,15 @@ impl App {
             }
             Nav::Services => {
                 self.page = 0;
+                self.tab = self.problem_tab();
+                Screen::Services
+            }
+            Nav::Tab(i) => {
+                let t = screens::Tab::ALL[(i as usize).min(2)];
+                if t != self.tab {
+                    self.page = 0;
+                }
+                self.tab = t;
                 Screen::Services
             }
             Nav::Page(p) => {
@@ -307,16 +329,29 @@ impl App {
         self.update(socket, now);
     }
 
+    /// Services opens on the first tab with a problem (from Home's data), else Apps.
+    fn problem_tab(&self) -> screens::Tab {
+        let Some(s) = &self.home.snapshot else {
+            return screens::Tab::Apps;
+        };
+        if s.docker.as_ref().is_none_or(|d| d.running < d.total) {
+            screens::Tab::Apps
+        } else if s.units.as_ref().is_some_and(|u| u.running < u.total) {
+            screens::Tab::Host
+        } else if s.web.as_ref().is_some_and(|w| w.ok < w.total) {
+            screens::Tab::Web
+        } else {
+            screens::Tab::Apps
+        }
+    }
+
     /// The container the open screen shows (None: not loaded yet, or it was removed).
     pub fn open_container(&self) -> Option<&Service> {
         let Screen::Container(k) = self.screen() else {
             return None;
         };
-        self.services
-            .as_ref()?
-            .services
-            .iter()
-            .find(|s| key(&s.id) == k)
+        let d = self.services.as_ref()?;
+        d.services.iter().chain(&d.host).find(|s| key(&s.id) == k)
     }
 
     /// How long until the next fetch is due.
@@ -353,7 +388,9 @@ impl App {
                 screens::history(f, self.incidents.as_deref(), self.page, now_ms, at)
             }
             Screen::Incident(_) => screens::incident(f, self.incident.as_ref(), now_ms, at),
-            Screen::Services => screens::services(f, self.services.as_ref(), self.page),
+            Screen::Services => {
+                screens::services(f, self.services.as_ref(), self.tab, self.page, at)
+            }
             Screen::Container(_) => {
                 let cpu: Vec<f32> = self.svc_cpu.iter().copied().collect();
                 let mem: Vec<f32> = self.svc_mem.iter().copied().collect();

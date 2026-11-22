@@ -73,6 +73,55 @@ pub struct Docker {
     pub containers: Vec<Container>,
 }
 
+/// A host service from /etc/pios/checks (`host NAME`), running or not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Unit {
+    pub name: String,
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Units {
+    pub running: u32,
+    pub total: u32,
+    pub units: Vec<Unit>,
+}
+
+/// One public hostname from /etc/pios/checks (`web HOST CODE`), as `pios web` last saw it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebCheck {
+    pub host: String,
+    pub expect: u16,
+    /// None: no answer (timeout, DNS, TLS…)
+    pub code: Option<u16>,
+    pub ms: Option<u32>,
+    pub error: Option<String>,
+    pub ok: bool,
+    /// failed checks in a row (an incident opens at 2)
+    pub fails: u32,
+}
+
+impl WebCheck {
+    /// No answer or a server error is down; another unexpected code needs attention.
+    pub fn down(&self) -> bool {
+        self.code.is_none_or(|c| c >= 500)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Web {
+    pub ok: u32,
+    pub total: u32,
+    /// ms since the Unix epoch
+    pub checked_at: i64,
+    pub every_sec: u32,
+    pub checks: Vec<WebCheck>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
@@ -85,6 +134,12 @@ pub struct Snapshot {
     pub network: Network,
     /// None when Docker isn't reachable
     pub docker: Option<Docker>,
+    /// None when no `host` lines are set up
+    #[serde(default)]
+    pub units: Option<Units>,
+    /// None when no `web` lines are set up, or `pios web` hasn't reported for 3 minutes
+    #[serde(default)]
+    pub web: Option<Web>,
 }
 
 pub fn now_ms() -> i64 {

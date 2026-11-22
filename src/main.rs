@@ -9,6 +9,7 @@
 //!   pios update vX.Y.Z | --rollback  install a GitHub release (checksum, health check, auto-rollback)
 //!   pios uninstall [--keep-data]     remove everything `setup` created
 //!   pios helper                      filtered Docker access (started by pios-helper.socket)
+//!   pios web                         public hostname checks every 60 s (pios-web.service)
 //!   pios deploy-ssh                  forced command of the Jenkins deploy key
 //!   pios version
 //!
@@ -16,8 +17,11 @@
 //!   PIOS_DATA_DIR       where pios.db lives        (default ./data)
 //!   PIOS_SOCKET         API socket                  (default $PIOS_DATA_DIR/pios.sock)
 //!   PIOS_DOCKER_SOCKET  Docker socket               (default /var/run/docker.sock)
+//!   PIOS_CHECKS         host services + hostnames   (default /etc/pios/checks, see checks.rs)
+//!   PIOS_WEB_OUT        `pios web` results file      (default /run/pios-web/web.json)
 
 mod api;
+mod checks;
 mod collect;
 mod details;
 mod error;
@@ -32,6 +36,7 @@ mod store;
 mod types;
 mod ui;
 mod update;
+mod web;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -257,6 +262,7 @@ fn main() -> ExitCode {
         Some("snapshot") => snapshot(),
         Some("ui") => ui::run(&rest, &api_socket()),
         Some("helper") => helper::run(docker_socket()),
+        Some("web") => web::run(),
         Some("setup") => match rest.as_slice() {
             [] => setup::setup(None),
             [flag, file] if flag == "--deploy-key" => {
@@ -280,7 +286,7 @@ fn main() -> ExitCode {
         }
         _ => {
             eprintln!(
-                "usage: pios <agent|snapshot|ui|version|setup|update|uninstall|helper|deploy-ssh>"
+                "usage: pios <agent|snapshot|ui|version|setup|update|uninstall|helper|web|deploy-ssh>"
             );
             return ExitCode::from(2);
         }

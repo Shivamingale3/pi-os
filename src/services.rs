@@ -22,6 +22,12 @@ pub struct Services {
     /// false: Docker (or the helper) didn't answer
     pub reachable: bool,
     pub services: Vec<Service>,
+    /// host services from /etc/pios/checks (`host` lines)
+    #[serde(default)]
+    pub host: Vec<Service>,
+    /// `pios web`'s latest results (None: no `web` lines, or no fresh results)
+    #[serde(default)]
+    pub web: Option<crate::types::Web>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -51,6 +57,12 @@ pub struct Service {
     /// a restart asked for from the screen in the last minute
     #[serde(default)]
     pub restart: Option<Restart>,
+    /// a host service (systemd), not a container: no Restart; `image` holds its main process
+    #[serde(default)]
+    pub host: bool,
+    /// processes and threads in it (host services)
+    #[serde(default)]
+    pub tasks: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -351,15 +363,23 @@ fn uptime_of(dir: &Path) -> Option<u64> {
     Some((up as u64).saturating_sub(start / hz))
 }
 
+/// Containers (through the helper), host services (from /etc/pios/checks, by their cgroups)
+/// and `pios web`'s latest results, with CPU sampled over 300 ms for everything running.
 pub fn collect(socket: &Path) -> Result<Services> {
     let got = crate::http::get(socket, crate::helper::ALLOWED, Duration::from_secs(5));
-    let mut list = match got {
-        Ok((200, body)) => parse_list(&body)?,
-        _ => return Ok(unreachable()),
+    let (reachable, mut list) = match got {
+        Ok((200, body)) => (true, parse_list(&body)?),
+        _ => (false, vec![]),
     };
+    let cfg = crate::checks::load(&crate::checks::path());
+    let mut host = host_services(&cfg);
     let dirs: Vec<Option<PathBuf>> = list
         .iter()
         .map(|s| (s.state == "running").then(|| cgroup_dir(&s.id)).flatten())
+        .chain(
+            host.iter()
+                .map(|s| (s.state == "running").then(|| crate::checks::unit_dir(&s.name))),
+        )
         .collect();
     let cpu = |d: &Option<PathBuf>| {
         d.as_ref()
@@ -371,7 +391,7 @@ pub fn collect(socket: &Path) -> Result<Services> {
     std::thread::sleep(SAMPLE);
     let b: Vec<Option<u64>> = dirs.iter().map(cpu).collect();
     let el = t0.elapsed().as_micros().max(1) as f64;
-    for (i, s) in list.iter_mut().enumerate() {
+    for (i, s) in list.iter_mut().chain(host.iter_mut()).enumerate() {
         let Some(dir) = &dirs[i] else { continue };
         if let (Some(a), Some(b)) = (a[i], b[i]) {
             s.cpu = Some(b.saturating_sub(a) as f64 / el * 100.0);
@@ -379,21 +399,58 @@ pub fn collect(socket: &Path) -> Result<Services> {
         s.mem = read_u64(&dir.join("memory.current"));
         s.mem_limit = read_u64(&dir.join("memory.max")); // "max" (no limit) → None
         s.up_sec = uptime_of(dir);
+        if s.host {
+            s.tasks = read_u64(&dir.join("pids.current"));
+            s.image = first_process(dir).unwrap_or_default();
+        }
     }
     for s in list.iter_mut() {
         s.restart = recent(&s.id);
     }
     Ok(Services {
-        reachable: true,
+        reachable,
         services: list,
+        host,
+        web: crate::checks::web(&cfg, &crate::checks::web_out(), crate::types::now_ms()),
     })
 }
 
-fn unreachable() -> Services {
-    Services {
-        reachable: false,
-        services: vec![],
-    }
+/// A host service's handle: a stable hex ID from its name (FNV-1a), so `key` works for it.
+pub fn host_id(name: &str) -> String {
+    let h = name.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{h:016x}")
+}
+
+fn host_services(cfg: &crate::checks::Config) -> Vec<Service> {
+    crate::checks::units(cfg)
+        .map(|u| u.units)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|u| Service {
+            id: host_id(&u.name),
+            state: if u.running { "running" } else { "stopped" }.into(),
+            host: true,
+            name: u.name,
+            ..Service::default()
+        })
+        .collect()
+}
+
+/// The command name of the service's main (first) process: "nginx", "sshd".
+fn first_process(dir: &Path) -> Option<String> {
+    let pid = std::fs::read_to_string(dir.join("cgroup.procs"))
+        .ok()?
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .min()?;
+    Some(
+        std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()?
+            .trim()
+            .to_string(),
+    )
 }
 
 #[cfg(test)]

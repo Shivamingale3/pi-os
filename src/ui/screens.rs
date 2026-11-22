@@ -18,6 +18,7 @@ use crate::details::{CpuDetails, DiskDetails, MemDetails, TempDetails};
 use crate::rules::THRESHOLDS;
 use crate::services::{Service, Services};
 use crate::types::Snapshot;
+use crate::types::{Web, WebCheck};
 
 const M: f32 = theme::SCREEN_MARGIN;
 const WIDTH: f32 = theme::W - 2.0 * theme::SCREEN_MARGIN;
@@ -1617,6 +1618,7 @@ fn tile_line(s: &Service) -> String {
             None => "exited".into(),
         },
         "created" => "never started".into(),
+        "stopped" => "not running".into(),
         "paused" => format!("paused{mem}"),
         other => other.into(),
     }
@@ -1639,28 +1641,135 @@ pub fn tiles_per_page(n: usize) -> usize {
     if n <= 9 { 9 } else { 6 }
 }
 
-pub fn services(f: &Fonts, d: Option<&Services>, page: usize) -> Tree {
+/// The three tabs of the Services screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    Apps,
+    Host,
+    Web,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 3] = [Tab::Apps, Tab::Host, Tab::Web];
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Apps => "Apps",
+            Tab::Host => "Host",
+            Tab::Web => "Web",
+        }
+    }
+}
+
+pub fn web_status(c: &WebCheck) -> Status {
+    if c.ok {
+        Status::Good
+    } else if c.down() {
+        Status::Down
+    } else {
+        Status::Attention
+    }
+}
+
+/// Which tabs hold a problem (▲ on the tab).
+pub fn tab_problems(d: &Services) -> [bool; 3] {
+    [
+        !d.reachable || d.services.iter().any(|s| service_status(s) != Status::Good),
+        d.host.iter().any(|s| service_status(s) != Status::Good),
+        d.web
+            .as_ref()
+            .is_some_and(|w| w.checks.iter().any(|c| !c.ok)),
+    ]
+}
+
+pub const TAB_W: f32 = 72.0;
+
+/// Header with the title on the left and the three tabs (44 px touch targets) on the right.
+fn tabs_header(b: &mut B, active: Tab, problems: [bool; 3]) {
+    b.header("Services", "");
+    let tabs_w = 3.0 * TAB_W + 2.0 * GAP;
+    let x0 = theme::W - M - tabs_w;
+    // keep the title clear of the tabs
+    if let Some(t) = b.t.items.iter_mut().find(|i| i.name == "title") {
+        t.rect.w = t.rect.w.min(x0 - GAP - t.rect.x);
+    }
+    let h = 0; // the header is the first item
+    let ls = Style::new(Face::SemiBold, size::BODY.0);
+    for (i, tab) in Tab::ALL.into_iter().enumerate() {
+        let r = Rect::new(x0 + i as f32 * (TAB_W + GAP), M, TAB_W, 44.0);
+        let on = tab == active;
+        let it = b.t.add(
+            Some(h),
+            tab.label(),
+            r,
+            Paint::Panel {
+                fill: if on { theme::TRACK } else { theme::SURFACE },
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        b.t.nav(it, Nav::Tab(i as u8));
+        b.t.pad(it, 8.0);
+        let lw = b.f.width(&ls, tab.label());
+        let mark = if problems[i] { 10.0 + MIN_GAP } else { 0.0 };
+        let x = r.x + (r.w - lw - mark) / 2.0;
+        b.text(
+            it,
+            "label",
+            Rect::new(x, r.y + 8.0, lw, 28.0),
+            tab.label(),
+            ls,
+            if on { INK } else { INK2 },
+        );
+        if problems[i] {
+            b.t.add(
+                Some(it),
+                "warn",
+                Rect::new(x + lw + MIN_GAP, r.cy() - 5.0, 10.0, 10.0),
+                Paint::Marker(Marker::Triangle(status_colors(Status::Attention).shape)),
+            );
+        }
+    }
+}
+
+fn empty_note(b: &mut B, msg: &str) {
+    let (c, r) = b.card("empty", Rect::new(M, TOP, WIDTH, 244.0), "", "");
+    b.note(c, r, msg);
+}
+
+pub fn services(
+    f: &Fonts,
+    d: Option<&Services>,
+    tab: Tab,
+    page: usize,
+    at: &dyn Fn(i64) -> (String, String),
+) -> Tree {
     let mut b = B::new(f);
     let Some(d) = d else {
         return reading(&mut b, "Services");
     };
-    b.header("Services", "");
-    if !d.reachable || d.services.is_empty() {
-        let (c, r) = b.card("empty", Rect::new(M, TOP, WIDTH, 244.0), "", "");
-        b.note(
-            c,
-            r,
-            if d.reachable {
-                "No containers"
-            } else {
-                "Docker not reachable"
-            },
-        );
-        return b.t;
+    tabs_header(&mut b, tab, tab_problems(d));
+    match tab {
+        Tab::Apps if !d.reachable => empty_note(&mut b, "Docker not reachable"),
+        Tab::Apps if d.services.is_empty() => empty_note(&mut b, "No containers"),
+        Tab::Apps => grid(&mut b, &sorted(&d.services), page),
+        Tab::Host if d.host.is_empty() => empty_note(
+            &mut b,
+            "No host services set up (host lines in /etc/pios/checks)",
+        ),
+        Tab::Host => grid(&mut b, &sorted(&d.host), page),
+        Tab::Web => match &d.web {
+            Some(w) if !w.checks.is_empty() => web_list(&mut b, w, page, at),
+            _ => empty_note(&mut b, "No web results (web lines in /etc/pios/checks)"),
+        },
     }
-    let list = sorted(&d.services);
+    b.t
+}
+
+/// Tiles, 3 × 3, or 2 rows and the pager when there are more than 9.
+fn grid(b: &mut B, list: &[&Service], page: usize) {
     let per = tiles_per_page(list.len());
-    let pages = list.len().div_ceil(per);
+    let pages = list.len().div_ceil(per).max(1);
     let page = page.min(pages - 1);
     let name_style = Style::new(Face::SemiBold, size::TITLE.0);
     for (i, s) in list.iter().skip(page * per).take(per).enumerate() {
@@ -1710,9 +1819,142 @@ pub fn services(f: &Fonts, d: Option<&Services>, page: usize) -> Tree {
         );
     }
     if pages > 1 {
-        pager(&mut b, theme::H - M - 44.0, page, pages);
+        pager(b, theme::H - M - 44.0, page, pages);
     }
-    b.t
+}
+
+pub const WEB_ROWS: usize = 4;
+
+/// The domain every host shares ("example.com"), if they all do: shown once, in the label.
+fn shared_domain(hosts: &[&str]) -> Option<String> {
+    let first = hosts.first()?;
+    let dom = first.split_once('.')?.1;
+    (dom.contains('.') || hosts.len() > 1)
+        .then_some(())
+        .filter(|_| {
+            hosts
+                .iter()
+                .all(|h| h.split_once('.').is_some_and(|(_, d)| d == dom))
+        })
+        .map(|_| dom.to_string())
+}
+
+/// What a failing check says instead of its time: "want 200", "timeout", "no DNS"…
+fn web_note(c: &WebCheck) -> String {
+    if c.ok {
+        return c
+            .ms
+            .map(|ms| format!("{:.2} s", ms as f64 / 1000.0))
+            .unwrap_or_default();
+    }
+    if c.code.is_some() {
+        return format!("want {}", c.expect);
+    }
+    let e = c.error.as_deref().unwrap_or("").to_ascii_lowercase();
+    if e.contains("timed out") {
+        "timeout"
+    } else if e.contains("resolve") {
+        "no DNS"
+    } else if e.contains("ssl") || e.contains("certificate") || e.contains("tls") {
+        "TLS error"
+    } else if e.contains("connect") {
+        "no connection"
+    } else {
+        "no answer"
+    }
+    .into()
+}
+
+fn web_list(b: &mut B, w: &Web, page: usize, at: &dyn Fn(i64) -> (String, String)) {
+    let mut list: Vec<&WebCheck> = w.checks.iter().collect();
+    let rank = |c: &WebCheck| match web_status(c) {
+        Status::Down => 0,
+        Status::Attention => 1,
+        _ => 2,
+    };
+    list.sort_by_key(|c| rank(c)); // stable: keeps the file's order within each group
+    let hosts: Vec<&str> = list.iter().map(|c| c.host.as_str()).collect();
+    let domain = shared_domain(&hosts);
+    let pages = list.len().div_ceil(WEB_ROWS).max(1);
+    let page = page.min(pages - 1);
+    let label = domain
+        .as_ref()
+        .map(|d| format!("*.{}", d.to_uppercase()))
+        .unwrap_or_else(|| "PUBLIC HOSTNAMES".into());
+    let (t, _) = at(w.checked_at);
+    let (c, r) = b.card(
+        "web",
+        Rect::new(M, TOP, WIDTH, 192.0),
+        &label,
+        &format!("checked {t} · every {} s", w.every_sec),
+    );
+    let row_h = 34.0;
+    let code_w = 52.0;
+    let note_w = 104.0;
+    let mut y = r.y;
+    for ch in list.iter().skip(page * WEB_ROWS).take(WEB_ROWS) {
+        let st = web_status(ch);
+        let sc = status_colors(st);
+        let row =
+            b.t.add(Some(c), "row", Rect::new(r.x, y, r.w, row_h), Paint::None);
+        b.t.add(
+            Some(row),
+            "marker",
+            Rect::new(r.x, y + (row_h - 10.0) / 2.0, 10.0, 10.0),
+            Paint::Marker(status_marker(st)),
+        );
+        let name = match &domain {
+            Some(d) => ch.host.strip_suffix(&format!(".{d}")).unwrap_or(&ch.host),
+            None => ch.host.as_str(),
+        };
+        let nx = r.x + 10.0 + GAP;
+        let right = code_w + GAP + note_w + GAP;
+        b.text(
+            row,
+            "host",
+            Rect::new(nx, y, r.right() - right - nx, row_h),
+            name,
+            Style::new(Face::SemiBold, size::BODY.0),
+            INK,
+        );
+        b.text_right(
+            row,
+            "note",
+            Rect::new(r.right() - code_w - GAP - note_w, y, note_w, row_h),
+            &web_note(ch),
+            mono(),
+            if st == Status::Good { INK3 } else { sc.text },
+        );
+        let badge = b.t.add(
+            Some(row),
+            "code",
+            Rect::new(r.right() - code_w, y + 6.0, code_w, row_h - 12.0),
+            Paint::Panel {
+                fill: theme::RAISED,
+                radius: 6.0,
+                border: None,
+            },
+        );
+        let code = ch.code.map(|c| c.to_string()).unwrap_or_else(|| "—".into());
+        let cw = b.f.width(&mono(), &code);
+        b.text(
+            badge,
+            "value",
+            Rect::new(
+                r.right() - code_w + (code_w - cw) / 2.0,
+                y + 6.0,
+                cw,
+                row_h - 12.0,
+            ),
+            &code,
+            mono(),
+            if st == Status::Good { INK2 } else { sc.text },
+        );
+        y += row_h + MIN_GAP;
+    }
+    if pages > 1 {
+        pager(b, theme::H - M - 44.0, page, pages);
+    }
 }
 
 fn capitalized(s: &str) -> String {
@@ -1881,31 +2123,59 @@ pub fn container(
         }
     }
 
-    // container
+    // container (or host service: no Restart, so the card takes the full width)
     let (c, r) = b.card(
         "container",
-        Rect::new(M, TOP + 120.0 + GAP, 304.0, 116.0),
-        "CONTAINER",
+        Rect::new(
+            M,
+            TOP + 120.0 + GAP,
+            if s.host { WIDTH } else { 304.0 },
+            116.0,
+        ),
+        if s.host { "SERVICE" } else { "CONTAINER" },
         "",
     );
-    let compose = match (&s.project, &s.service) {
-        (Some(p), Some(sv)) => format!("{p} · {sv}"),
-        (Some(p), None) => p.clone(),
-        _ => "not started by Compose".into(),
-    };
-    let ports = if !s.ports.is_empty() {
-        s.ports.join(", ")
-    } else if s.state == "running" {
-        "none".into()
+    let rows: [(&str, String); 3] = if s.host {
+        let running = s.state == "running";
+        [
+            ("Unit", format!("{}.service", s.name)),
+            (
+                "Process",
+                if s.image.is_empty() {
+                    "none while stopped".into()
+                } else {
+                    s.image.clone()
+                },
+            ),
+            (
+                "Tasks",
+                match s.tasks {
+                    Some(n) if running => n.to_string(),
+                    _ => "none".into(),
+                },
+            ),
+        ]
     } else {
-        "none while stopped".into()
+        let compose = match (&s.project, &s.service) {
+            (Some(p), Some(sv)) => format!("{p} · {sv}"),
+            (Some(p), None) => p.clone(),
+            _ => "not started by Compose".into(),
+        };
+        let ports = if !s.ports.is_empty() {
+            s.ports.join(", ")
+        } else if s.state == "running" {
+            "none".into()
+        } else {
+            "none while stopped".into()
+        };
+        [
+            ("Image", s.image.clone()),
+            ("Compose", compose),
+            ("Ports", ports),
+        ]
     };
     let mut y = r.y;
-    for (name, v) in [
-        ("Image", s.image.clone()),
-        ("Compose", compose),
-        ("Ports", ports),
-    ] {
+    for (name, v) in rows {
         let key_w = 72.0;
         let row =
             b.t.add(Some(c), "row", Rect::new(r.x, y, r.w, 18.0), Paint::None);
@@ -1928,6 +2198,9 @@ pub fn container(
         y += 18.0 + MIN_GAP;
     }
 
+    if s.host {
+        return b.t;
+    }
     restart_button(
         &mut b,
         s,

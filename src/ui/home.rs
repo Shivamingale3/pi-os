@@ -21,6 +21,8 @@ use crate::types::Snapshot;
 pub struct OpenIncident {
     pub kind: String,
     pub title: String,
+    /// "warn" or "critical"
+    pub severity: String,
 }
 
 /// Everything Home shows, read from the agent.
@@ -111,7 +113,7 @@ impl Home {
             .open
             .iter()
             .map(|i| {
-                let st = if i.kind == "metric" {
+                let st = if i.kind == "metric" || i.severity == "warn" {
                     Status::Attention
                 } else {
                     Status::Down
@@ -155,17 +157,71 @@ impl Home {
                 }
             }
         };
+        // host services and web: an open incident sets the colour; a failure that hasn't
+        // opened one yet (under 30 s, or one failed check) is amber
+        let group = |name: &'static str, kind: &str, counts: Option<(u32, u32)>| match counts {
+            None => Group {
+                name,
+                value: None,
+                status: Status::Unknown,
+            },
+            Some((ok, total)) => {
+                let open: Vec<&OpenIncident> = d.open.iter().filter(|i| i.kind == kind).collect();
+                let st = if open.iter().any(|i| i.severity != "warn") {
+                    Status::Down
+                } else if !open.is_empty() || ok < total {
+                    Status::Attention
+                } else {
+                    Status::Good
+                };
+                Group {
+                    name,
+                    value: Some(format!("{ok}/{total}")),
+                    status: st,
+                }
+            }
+        };
+        let host = group(
+            "Host",
+            "unit",
+            s.units.as_ref().map(|u| (u.running, u.total)),
+        );
+        let web = group("Web", "web", s.web.as_ref().map(|w| (w.ok, w.total)));
+        let pending = [
+            (
+                s.units.as_ref().map(|u| u.total - u.running),
+                "unit",
+                "host service",
+                "not running",
+            ),
+            (
+                s.web.as_ref().map(|w| w.total - w.ok),
+                "web",
+                "website",
+                "failing",
+            ),
+        ];
+        for (bad, kind, noun, verb) in pending {
+            let bad = bad.unwrap_or(0);
+            if bad > 0 && !d.open.iter().any(|i| i.kind == kind) {
+                let s = if bad == 1 { "" } else { "s" };
+                problems.push((Status::Attention, format!("{bad} {noun}{s} {verb}")));
+            }
+        }
         problems.sort_by_key(|p| std::cmp::Reverse(p.0));
         let status = problems.first().map(|p| p.0).unwrap_or(Status::Good);
 
         let up = format!("{} · load {:.2}", uptime(s.host.uptime_sec), s.host.load[0]);
         let (headline, line2, line3) = match status {
             Status::Good => {
-                let (ok, total) = s
-                    .docker
-                    .as_ref()
-                    .map(|d| (d.running, d.total))
-                    .unwrap_or((0, 0));
+                let (ok, total) = [
+                    s.docker.as_ref().map(|d| (d.running, d.total)),
+                    s.units.as_ref().map(|u| (u.running, u.total)),
+                    s.web.as_ref().map(|w| (w.ok, w.total)),
+                ]
+                .into_iter()
+                .flatten()
+                .fold((0, 0), |(a, b), (x, y)| (a + x, b + y));
                 let checks = if total == 0 {
                     "No checks set up yet".to_string()
                 } else {
@@ -190,11 +246,6 @@ impl Home {
             }
         };
 
-        let not_set_up = |name| Group {
-            name,
-            value: None,
-            status: Status::Unknown,
-        };
         let temp = s.cpu.temp_c;
         let tiles = [
             Tile {
@@ -246,7 +297,7 @@ impl Home {
             headline,
             line2,
             line3,
-            groups: [apps, not_set_up("Host"), not_set_up("Web")],
+            groups: [apps, host, web],
             tiles,
         }
     }
