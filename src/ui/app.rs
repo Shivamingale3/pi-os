@@ -169,6 +169,13 @@ impl App {
             }
             // an action, not a place (see `act`)
             Nav::Restart(_) => self.screen(),
+            // everything the open screen shows becomes due now (the caller fetches right after)
+            Nav::Refresh => {
+                for (k, _) in self.needs() {
+                    self.last.remove(k);
+                }
+                self.screen()
+            }
             Nav::Incident(id) => {
                 if self.incident.as_ref().is_none_or(|i| i.incident.id != id) {
                     self.incident = None;
@@ -447,6 +454,20 @@ mod tests {
         a.go(Nav::Cpu);
         let keys: Vec<_> = a.needs().into_iter().map(|(k, _)| k).collect();
         assert_eq!(keys, ["home", "cpu", "cpu_trend"]);
+    }
+
+    #[test]
+    fn refresh_makes_the_open_screen_due_now() {
+        let mut a = App::live();
+        a.go(Nav::Cpu);
+        let now = Instant::now();
+        for (k, _) in a.needs() {
+            a.last.insert(k, now);
+        }
+        assert!(a.next_due(now) > Duration::ZERO);
+        a.go(Nav::Refresh);
+        assert_eq!(a.screen(), Screen::Cpu, "refresh stays on the screen");
+        assert_eq!(a.next_due(now), Duration::ZERO);
     }
 
     #[test]

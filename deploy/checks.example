@@ -2,9 +2,10 @@
 # The agent and pios-web re-read it every minute; no restart needed.
 #
 # host NAME          a systemd service that should be running (nginx or nginx.service)
-# web HOST [CODE]    https://HOST/ should answer CODE (default 200); redirects aren't followed
+# web HOST[/PATH] [CODE]  https://HOST/PATH should answer CODE (default 200); no redirects followed
 #
 # host nginx
 # host ssh
 # web status.example.com
 # web s3.example.com 403
+# web cloud.example.com/status.php

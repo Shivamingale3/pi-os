@@ -273,7 +273,7 @@ mod tests {
         let fonts = Fonts::load();
         let tree = Home::build(
             &super::super::sample("good").unwrap(),
-            "12:04",
+            "12:04 PM",
             "Wed 18 Nov",
         )
         .tree(&fonts);
@@ -302,7 +302,7 @@ mod tests {
         let fonts = Fonts::load();
         let tree = Home::build(
             &super::super::sample("good").unwrap(),
-            "12:04",
+            "12:04 PM",
             "Wed 18 Nov",
         )
         .tree(&fonts);
@@ -329,7 +329,7 @@ mod tests {
         let fonts = Fonts::load();
         let d = super::super::sample("good").unwrap();
         let a = frame(
-            &Home::build(&d, "12:04", "Wed 18 Nov").tree(&fonts),
+            &Home::build(&d, "12:04 PM", "Wed 18 Nov").tree(&fonts),
             &fonts,
             None,
         );

@@ -265,10 +265,13 @@ impl<'f> B<'f> {
             Rect::new(M + 12.0, M + 12.0, 20.0, 20.0),
             Paint::Chevron(INK, false),
         );
+        let refresh = Rect::new(theme::W - M - 44.0, M, 44.0, 44.0);
+        self.t.refresh_button(Some(h), refresh);
         let ts = Style::new(Face::SemiBold, 20.0).spacing(-0.2);
         let x = M + 44.0 + GAP;
-        let meta_w = self.f.width(&body(), meta).min(WIDTH * 0.45);
-        let title_room = WIDTH - 44.0 - GAP - if meta.is_empty() { 0.0 } else { meta_w + GAP };
+        let meta_w = self.f.width(&body(), meta).min(WIDTH * 0.4);
+        let title_room =
+            WIDTH - 2.0 * (44.0 + GAP) - if meta.is_empty() { 0.0 } else { meta_w + GAP };
         self.text(
             h,
             "title",
@@ -281,7 +284,7 @@ impl<'f> B<'f> {
             self.text_right(
                 h,
                 "meta",
-                Rect::new(theme::W - M - meta_w, M, meta_w, 44.0),
+                Rect::new(refresh.x - GAP - meta_w, M, meta_w, 44.0),
                 meta,
                 body(),
                 INK3,
@@ -1688,7 +1691,7 @@ pub const TAB_W: f32 = 72.0;
 fn tabs_header(b: &mut B, active: Tab, problems: [bool; 3]) {
     b.header("Services", "");
     let tabs_w = 3.0 * TAB_W + 2.0 * GAP;
-    let x0 = theme::W - M - tabs_w;
+    let x0 = theme::W - M - 44.0 - GAP - tabs_w; // left of the refresh button
     // keep the title clear of the tabs
     if let Some(t) = b.t.items.iter_mut().find(|i| i.name == "title") {
         t.rect.w = t.rect.w.min(x0 - GAP - t.rect.x);
@@ -1876,7 +1879,11 @@ fn web_list(b: &mut B, w: &Web, page: usize, at: &dyn Fn(i64) -> (String, String
         _ => 2,
     };
     list.sort_by_key(|c| rank(c)); // stable: keeps the file's order within each group
-    let hosts: Vec<&str> = list.iter().map(|c| c.host.as_str()).collect();
+    // "drive.example.com/status.php": the domain from the hostname part only
+    let hosts: Vec<&str> = list
+        .iter()
+        .map(|c| c.host.split('/').next().unwrap_or(&c.host))
+        .collect();
     let domain = shared_domain(&hosts);
     let pages = list.len().div_ceil(WEB_ROWS).max(1);
     let page = page.min(pages - 1);
@@ -1907,8 +1914,16 @@ fn web_list(b: &mut B, w: &Web, page: usize, at: &dyn Fn(i64) -> (String, String
             Paint::Marker(status_marker(st)),
         );
         let name = match &domain {
-            Some(d) => ch.host.strip_suffix(&format!(".{d}")).unwrap_or(&ch.host),
-            None => ch.host.as_str(),
+            Some(d) => {
+                let (host, path) = ch.host.split_once('/').unwrap_or((&ch.host, ""));
+                let label = host.strip_suffix(&format!(".{d}")).unwrap_or(host);
+                if path.is_empty() {
+                    label.to_string()
+                } else {
+                    format!("{label}/{path}")
+                }
+            }
+            None => ch.host.clone(),
         };
         let nx = r.x + 10.0 + GAP;
         let right = code_w + GAP + note_w + GAP;
@@ -1916,7 +1931,7 @@ fn web_list(b: &mut B, w: &Web, page: usize, at: &dyn Fn(i64) -> (String, String
             row,
             "host",
             Rect::new(nx, y, r.right() - right - nx, row_h),
-            name,
+            &name,
             Style::new(Face::SemiBold, size::BODY.0),
             INK,
         );
