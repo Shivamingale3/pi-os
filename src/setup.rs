@@ -358,8 +358,9 @@ mod tests {
         let ui = UI_UNIT.1;
         for line in [
             "User=pios-ui",
-            "Conflicts=tft-btop.service",
             "Environment=PIOS_FB_SWAP_RB=1",
+            "Environment=PIOS_RING_DEVICE=1f00098000.pwm",
+            "Conflicts=tft-btop.service case-ring-breathe.service",
             "MemoryMax=60M",
             "CPUQuota=10%",
             "DevicePolicy=closed",

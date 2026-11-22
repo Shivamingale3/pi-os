@@ -4,9 +4,9 @@
 # service whenever pios-ui starts; `pios uninstall` disables pios-ui.
 [Unit]
 Description=PiOS screen (480x320 panel)
-Conflicts=tft-btop.service
+Conflicts=tft-btop.service case-ring-breathe.service
 Wants=pios-agent.service
-After=pios-agent.service tft-btop.service
+After=pios-agent.service tft-btop.service case-ring-breathe.service
 
 [Service]
 Type=simple
@@ -20,11 +20,21 @@ Environment=PIOS_IDLE_MIN=30
 Environment="PIOS_TOUCH_MATRIX=0 1.1052 -0.0649 1.1297 0 -0.0755"
 # the panel is wired BGR though the driver reports RGB: without this, red shows as purple
 Environment=PIOS_FB_SWAP_RB=1
+# the button's LED ring: RP1 PWM0 channel 1 (GPIO13), driven by pios-ui's ring thread
+Environment=PIOS_RING_DEVICE=1f00098000.pwm
+Environment=PIOS_RING_CHANNEL=1
+# the screen's own settings (the LED ring's choices)
+Environment=PIOS_UI_STATE=/var/lib/pios-ui
+StateDirectory=pios-ui
+StateDirectoryMode=0700
 # '+' = these two run as root, outside the sandbox: hide the text console on the panel and let
 # pios-ui switch the backlight; on stop, give both back (the console reappears on the panel).
 ExecStartPre=+/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q "frame buffer" "$v/name" && echo 0 > "$v/bind"; done; b=/sys/class/backlight/tft-backlight/brightness; if [ -e "$b" ]; then chgrp pios-ui "$b"; chmod g+w "$b"; echo 1 > "$b"; fi; true'
+# '+' = as root: open the ring's PWM channel (1 kHz) to pios-ui only; on stop, dark and root again
+ExecStartPre=+/bin/sh -c 'for c in /sys/class/pwm/pwmchip*; do case "$(readlink -f "$c/device")" in */1f00098000.pwm) [ -d "$c/pwm1" ] || echo 1 > "$c/export"; p="$c/pwm1"; echo 0 > "$p/duty_cycle"; echo 1000000 > "$p/period"; echo 1 > "$p/enable"; chgrp pios-ui "$p/duty_cycle"; chmod g+w "$p/duty_cycle";; esac; done; true'
 ExecStart=/usr/local/bin/pios ui --fb /dev/fb0 --touch /dev/input/by-path/platform-1f00054000.spi-cs-0-event
 ExecStopPost=+/bin/sh -c 'b=/sys/class/backlight/tft-backlight/brightness; if [ -e "$b" ]; then echo 1 > "$b"; chgrp root "$b"; chmod g-w "$b"; fi; for v in /sys/class/vtconsole/vtcon*; do grep -q "frame buffer" "$v/name" && echo 1 > "$v/bind"; done; true'
+ExecStopPost=+/bin/sh -c 'for c in /sys/class/pwm/pwmchip*; do case "$(readlink -f "$c/device")" in */1f00098000.pwm) p="$c/pwm1"; [ -e "$p/duty_cycle" ] && { echo 0 > "$p/duty_cycle"; chgrp root "$p/duty_cycle"; chmod g-w "$p/duty_cycle"; };; esac; done; true'
 Restart=on-failure
 RestartSec=5
 

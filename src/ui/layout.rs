@@ -67,6 +67,12 @@ pub enum Nav {
     Tab(u8),
     /// fetch the open screen's data again, now
     Refresh,
+    Fans,
+    Settings,
+    /// the LED ring screen
+    Ring,
+    /// LED ring screen: row (0 good, 1 attention, 2 down, 3 brightness), choice (0–2)
+    RingSet(u8, u8),
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),
@@ -136,6 +142,8 @@ pub enum Paint {
     RestartIcon(Rgb),
     /// two half-circle arrows chasing each other (Refresh), unlike Restart's single arrow
     RefreshIcon(Rgb),
+    /// three short lines: the menu (Settings)
+    MenuIcon(Rgb),
     /// a turning three-quarter ring (Refresh while it fetches); `angle` in degrees
     Spinner {
         angle: f32,
@@ -471,6 +479,14 @@ pub fn render(t: &Tree, c: &mut Canvas) {
                     (back.0 - nx * 4.5, back.1 - ny * 4.5),
                 ]) {
                     c.stroke(&p, *col, 2.2);
+                }
+            }
+            Paint::MenuIcon(col) => {
+                for i in 0..3 {
+                    let y = r.y + 4.0 + i as f32 * 6.0;
+                    if let Some(p) = polyline(&[(r.x + 3.0, y), (r.right() - 3.0, y)]) {
+                        c.stroke(&p, *col, 2.0);
+                    }
                 }
             }
             Paint::Spinner { angle, color } => {

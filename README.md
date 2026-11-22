@@ -97,7 +97,20 @@ on the first tab with a problem: **Apps · Host · Web**. Apps lists one row per
 image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
 lifting or sliding away cancels, and a tap does nothing. **Host** lists one row per host service
 (its detail shows the unit, main process and tasks; no Restart). **Web** lists each hostname with
-its response time and HTTP code, problems first, 4 per page. Each screen has a 44 px back button and, top right, a refresh button that fetches what it shows
+its response time and HTTP code, problems first, 4 per page. **Fans** (tap the fan card on Temperatures, or from the menu) shows the case fan driven by
+[fan_ctl](https://github.com/Shivamingale3/fan_ctl) (its speed from the PWM, whether fan_ctl is
+running, its curve from `/etc/fan_ctl.conf` or the defaults, and which of NVMe or CPU it follows)
+beside the Active Cooler (rpm, steps and their temperatures); read-only, PiOS never drives a fan.
+The **menu** button on Home opens Settings: the **LED ring** screen chooses the pattern for each
+state (all good: breathe · steady · off; attention: pulse · blink · steady; down: blink · pulse ·
+steady) and its brightness; a tap saves it and plays it on the ring for 6 s.
+
+**LED ring**: the button's white ring says what Home says, by rhythm (breathing, a double pulse,
+a minute of blinking then the pulse; rising ramps while it starts; it fills with a Restart hold and
+flashes twice when it fires). A thread in `pios ui` drives the PWM, writing only when the level
+changes (at most 25 times a second, gamma-corrected). It keeps going while the screen is dark.
+
+Each screen has a 44 px back button and, top right, a refresh button that fetches what it shows
 again at once (website results themselves are taken once a minute by `pios web`). Times are
 12-hour ("8:27 PM").
 Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).
@@ -139,7 +152,7 @@ binary and are installed by `pios setup`.
 | `pios-agent.service` | `pios` (no shell, no Docker group; in `systemd-journal` to read the journal) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
 | `pios-web.service` | throwaway (`DynamicUser`) | the website checks: one `curl --parallel` a minute, results in `/run/pios-web/`. The only unit with network access. `MemoryMax=48M`, `CPUQuota=10%`, read-only system |
-| `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
+| `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it); the LED ring (its PWM channel is opened to `pios-ui` at start, dark again at stop). `Conflicts=tft-btop.service case-ring-breathe.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
 `systemd-analyze security` rates the agent 1.0 ("OK"; it may read other processes' CPU use for the CPU screen), the helper 0.7 and the screen 0.8 ("SAFE").
 

@@ -379,12 +379,30 @@ impl Home {
         t.content(bt, btn_text_w, btn_lh);
         let refresh = Rect::new(btn.x - GAP - 44.0, header.y, 44.0, 44.0);
         t.refresh_button(Some(hdr), refresh);
+        let menu = Rect::new(refresh.x - GAP - 44.0, header.y, 44.0, 44.0);
+        let mb = t.add(
+            Some(hdr),
+            "menu",
+            menu,
+            Paint::Panel {
+                fill: theme::SURFACE,
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        t.nav(mb, Nav::Settings);
+        t.add(
+            Some(mb),
+            "menu icon",
+            Rect::new(menu.x + 12.0, menu.y + 12.0, 20.0, 20.0),
+            Paint::MenuIcon(INK2),
+        );
 
         // hostname · time · date, on one baseline; the date goes first, then the hostname shrinks
         let title = Style::new(Face::SemiBold, size::TITLE.0);
         let small = Style::new(Face::Regular, size::BODY.0);
         let lh = size::TITLE.1;
-        let room = refresh.x - GAP - header.x;
+        let room = menu.x - GAP - header.x;
         let time_w = f.width(&title, &self.time);
         let date_w = f.width(&small, &self.date);
         let host_full = f.width(&title, &self.hostname);

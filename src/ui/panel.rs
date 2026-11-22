@@ -22,7 +22,8 @@ use crate::signals;
 use crate::types::now_ms;
 
 /// While the screen is dark, read the agent rarely (nothing is shown).
-pub const FETCH_EVERY_DARK: Duration = Duration::from_secs(60);
+/// (10 s, not more: the LED ring still shows the status while the screen is off)
+pub const FETCH_EVERY_DARK: Duration = Duration::from_secs(10);
 pub const PRESS_SHOWN: Duration = Duration::from_millis(150);
 pub const HOLD: Duration = Duration::from_secs(2);
 /// While a hold is in progress, redraw its bar this often.
@@ -97,6 +98,11 @@ pub struct Options {
     pub backlight: Option<PathBuf>,
     pub idle: Duration,
     pub socket: PathBuf,
+    /// the LED ring's pwmchip (by its `device`) and channel; None = no ring
+    pub ring_device: Option<String>,
+    pub ring_channel: u32,
+    /// where the screen keeps its settings (the LED ring's choices)
+    pub state_dir: Option<PathBuf>,
 }
 
 fn poll_touch(fd: Option<i32>, timeout: Duration) {
@@ -140,6 +146,19 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     );
 
     let mut app = App::live();
+    app.ring_path = o.state_dir.as_ref().map(|d| d.join("ring.conf"));
+    app.ring = super::ring::Settings::load(app.ring_path.as_deref());
+    let ring_state: super::ring::Shared =
+        std::sync::Arc::new(std::sync::Mutex::new(super::ring::State {
+            status: theme::Status::Unknown,
+            since: Instant::now(),
+            settings: app.ring,
+            hold: None,
+            fired: None,
+            preview: None,
+        }));
+    super::ring::spawn(o.ring_device.clone(), o.ring_channel, ring_state.clone());
+    let mut fired: Option<Instant> = None;
     let mut taps = Taps::default();
     let mut last_touch = Instant::now();
     let mut dark = false;
@@ -200,7 +219,22 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
         {
             holding = None;
             eprintln!("pios ui: hold fired: {:?}", h.nav);
+            fired = Some(now);
             app.act(h.nav, &o.socket, now);
+        }
+
+        // the ring says what Home says (also while the screen is dark)
+        {
+            let status = super::home::Home::build(&app.home, "", "").status;
+            let mut r = ring_state.lock().unwrap_or_else(|e| e.into_inner());
+            if r.status != status {
+                r.status = status;
+                r.since = now;
+            }
+            r.settings = app.ring;
+            r.hold = app.holding;
+            r.fired = fired;
+            r.preview = app.ring_preview;
         }
 
         if !dark && now - last_touch >= o.idle {
