@@ -410,6 +410,7 @@ fn svc(
         mem: running.then_some(mem_mb * MB),
         mem_limit: (n == 2).then_some(512 * MB),
         up_sec: running.then_some(up_min * 60),
+        restart: None,
     }
 }
 
@@ -637,6 +638,7 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::Restart;
     use crate::ui::app::SCREENS;
     use crate::ui::canvas::Fonts;
     use crate::ui::layout::{self, Nav};
@@ -824,7 +826,7 @@ mod tests {
                     }
                 }
             }
-            for s in &all.services {
+            for (si, s) in all.services.iter().enumerate() {
                 let mut a = sample_app(base, Screen::Services).unwrap();
                 a.go(Nav::Container(key(&s.id)));
                 for hist in [0usize, 1, 12] {
@@ -837,6 +839,60 @@ mod tests {
                         s.name
                     );
                     n += 1;
+                }
+                // every Restart button state (the first 8 cover every container state)
+                if si >= 8 {
+                    continue;
+                }
+                let long =
+                    "Error response from daemon: Cannot restart container: a very long reason";
+                let k = key(&s.id);
+                let states = [
+                    None,
+                    Some(Restart {
+                        ago_sec: 3,
+                        done: false,
+                        error: None,
+                    }),
+                    Some(Restart {
+                        ago_sec: 15,
+                        done: true,
+                        error: None,
+                    }),
+                    Some(Restart {
+                        ago_sec: 99_999,
+                        done: true,
+                        error: Some(long.into()),
+                    }),
+                ];
+                for r in states {
+                    for (hold, refused) in [
+                        (None, None),
+                        (Some(0.0), None),
+                        (Some(0.6), None),
+                        (Some(1.0), None),
+                        (None, Some(long)),
+                    ] {
+                        if let Some(c) = a
+                            .services
+                            .as_mut()
+                            .unwrap()
+                            .services
+                            .iter_mut()
+                            .find(|c| key(&c.id) == k)
+                        {
+                            c.restart = r.clone();
+                        }
+                        a.holding = hold;
+                        a.refused = refused.map(|w| (k, w.to_string()));
+                        let v = layout::check(&tree(&a, &f));
+                        assert!(
+                            v.is_empty(),
+                            "{base} {} restart={r:?} hold={hold:?}: {v:#?}",
+                            s.name
+                        );
+                        n += 1;
+                    }
                 }
             }
             // removed while open, and not loaded yet
@@ -871,6 +927,22 @@ mod tests {
         assert_eq!(a.screen(), Screen::Services);
         tap(&mut a, "back");
         assert_eq!(a.screen(), Screen::Home);
+        // Restart is a hold target: a tap does nothing, a press starts a hold
+        let mut a = sample_app("good", Screen::Container(0)).unwrap();
+        let t = tree(&a, &f);
+        let (x, y) = centre(&t, "restart");
+        let i = panel::hit(&t, x, y).unwrap();
+        assert!(t.items[i].hold);
+        let now = std::time::Instant::now();
+        let h = panel::Holding::start(&t, x, y, now).expect("hold starts on Restart");
+        let k = key(&a.open_container().unwrap().id);
+        assert_eq!(h.nav, Nav::Restart(k));
+        assert!(!h.moved_away(x + 10.0, y) && h.moved_away(x + 25.0, y));
+        let (bx, by) = centre(&t, "back");
+        assert!(panel::Holding::start(&t, bx, by, now).is_none());
+        let before = a.screen();
+        a.act(h.nav, Path::new("/nonexistent"), now); // a sample: logs only
+        assert_eq!(a.screen(), before);
         // paging keeps the Services screen
         let mut a = sample_app("worst", Screen::Services).unwrap();
         tap(&mut a, "next");

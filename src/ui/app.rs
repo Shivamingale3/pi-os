@@ -78,6 +78,10 @@ pub struct App {
     /// the open container's CPU and memory, one point per refresh
     pub svc_cpu: VecDeque<f32>,
     pub svc_mem: VecDeque<f32>,
+    /// the Restart button is being held: 0–1 of the 2 s (set by the panel or preview)
+    pub holding: Option<f32>,
+    /// the agent refused the last restart request (container key, why)
+    pub refused: Option<(u64, String)>,
     last: HashMap<&'static str, Instant>,
     /// false for built-in samples: never fetch
     pub live: bool,
@@ -137,9 +141,12 @@ impl App {
                 if self.screen() != Screen::Container(k) {
                     self.svc_cpu.clear();
                     self.svc_mem.clear();
+                    self.refused = None;
                 }
                 Screen::Container(k)
             }
+            // an action, not a place (see `act`)
+            Nav::Restart(_) => self.screen(),
             Nav::Incident(id) => {
                 if self.incident.as_ref().is_none_or(|i| i.incident.id != id) {
                     self.incident = None;
@@ -263,6 +270,43 @@ impl App {
         any
     }
 
+    /// A hold target fired: asks the agent to restart the open container, then refreshes so the
+    /// button shows "Please wait" at once. Samples only log it.
+    pub fn act(&mut self, nav: Nav, socket: &Path, now: Instant) {
+        let Nav::Restart(k) = nav else {
+            return self.go(nav);
+        };
+        let Some(id) = self
+            .open_container()
+            .filter(|s| key(&s.id) == k)
+            .map(|s| s.id.clone())
+        else {
+            return;
+        };
+        self.holding = None;
+        if !self.live {
+            eprintln!(
+                "pios ui: restart {} (sample: nothing sent)",
+                &id[..12.min(id.len())]
+            );
+            return;
+        }
+        let path = format!("/containers/{id}/restart");
+        self.refused = match crate::http::post(socket, &path, Duration::from_secs(3)) {
+            Ok((202, _)) => None,
+            Ok((_, body)) => Some((
+                k,
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .ok()
+                    .and_then(|v| v.get("error")?.as_str().map(String::from))
+                    .unwrap_or_else(|| "refused".into()),
+            )),
+            Err(_) => Some((k, "agent not answering".into())),
+        };
+        self.last.remove("services");
+        self.update(socket, now);
+    }
+
     /// The container the open screen shows (None: not loaded yet, or it was removed).
     pub fn open_container(&self) -> Option<&Service> {
         let Screen::Container(k) = self.screen() else {
@@ -313,12 +357,24 @@ impl App {
             Screen::Container(_) => {
                 let cpu: Vec<f32> = self.svc_cpu.iter().copied().collect();
                 let mem: Vec<f32> = self.svc_mem.iter().copied().collect();
+                let k = match self.screen() {
+                    Screen::Container(k) => k,
+                    _ => 0,
+                };
                 screens::container(
                     f,
                     self.open_container(),
                     &cpu,
                     &mem,
                     self.services.is_some(),
+                    screens::Hold {
+                        progress: self.holding,
+                        refused: self
+                            .refused
+                            .as_ref()
+                            .filter(|(rk, _)| *rk == k)
+                            .map(|(_, w)| w.as_str()),
+                    },
                 )
             }
         }

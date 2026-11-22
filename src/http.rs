@@ -1,5 +1,6 @@
 //! Minimal HTTP over unix sockets, both sides, no HTTP crate.
-//!   client: one GET (HTTP/1.0: the server sends a plain body and closes, so we read to the end)
+//!   client: one GET or body-less POST (HTTP/1.0: the server sends a plain body and closes, so
+//!   we read to the end)
 //!   server: read one request line, write one response, close (the agent's API, the Docker helper)
 
 use std::io::{Read, Write};
@@ -13,11 +14,27 @@ const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
 
 /// Returns (status code, body).
 pub fn get(socket: &Path, path: &str, timeout: Duration) -> Result<(u16, String)> {
+    request(socket, "GET", path, timeout)
+}
+
+/// A POST without a body (Docker's restart, the agent's restart).
+pub fn post(socket: &Path, path: &str, timeout: Duration) -> Result<(u16, String)> {
+    request(socket, "POST", path, timeout)
+}
+
+fn request(socket: &Path, method: &str, path: &str, timeout: Duration) -> Result<(u16, String)> {
     let mut stream =
         UnixStream::connect(socket).map_err(|e| err(format!("{}: {e}", socket.display())))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(format!("GET {path} HTTP/1.0\r\nHost: localhost\r\n\r\n").as_bytes())?;
+    let len = if method == "POST" {
+        "Content-Length: 0\r\n"
+    } else {
+        ""
+    };
+    stream.write_all(
+        format!("{method} {path} HTTP/1.0\r\nHost: localhost\r\n{len}\r\n").as_bytes(),
+    )?;
     let mut raw = Vec::new();
     stream.take(MAX_RESPONSE).read_to_end(&mut raw)?;
     parse_response(&raw)

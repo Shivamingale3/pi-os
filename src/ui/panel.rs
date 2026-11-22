@@ -3,7 +3,8 @@
 //! The loop sleeps in poll() on the touch device until something is due (a touch, the clock,
 //! the next fetch for the open screen, the end of a press highlight), so it costs nothing while
 //! nothing happens. It redraws only when the layout changes, and sends only changed rows (fb.rs).
-//! A tap brightens its target for a moment, then opens where it points.
+//! A tap brightens its target for a moment, then opens where it points. A hold target (Restart)
+//! ignores taps: it fires after HOLD of pressing still, and lifting or sliding away cancels it.
 //! Backlight: off after `idle` without a touch (and back to Home); the first touch on a dark
 //! screen only wakes it.
 
@@ -23,6 +24,37 @@ use crate::types::now_ms;
 /// While the screen is dark, read the agent rarely (nothing is shown).
 pub const FETCH_EVERY_DARK: Duration = Duration::from_secs(60);
 pub const PRESS_SHOWN: Duration = Duration::from_millis(150);
+pub const HOLD: Duration = Duration::from_secs(2);
+/// While a hold is in progress, redraw its bar this often.
+const HOLD_FRAME: Duration = Duration::from_millis(50);
+
+/// A press on a hold target, until it fires or is cancelled.
+#[derive(Debug, Clone, Copy)]
+pub struct Holding {
+    pub at: Instant,
+    pub from: (f32, f32),
+    pub nav: Nav,
+}
+
+impl Holding {
+    /// A press at (x, y) starts one if it lands on a hold target.
+    pub fn start(tree: &Tree, x: f32, y: f32, now: Instant) -> Option<Holding> {
+        let i = hit(tree, x, y)?;
+        let it = &tree.items[i];
+        (it.hold && it.nav.is_some()).then(|| Holding {
+            at: now,
+            from: (x, y),
+            nav: it.nav.unwrap(),
+        })
+    }
+    pub fn progress(&self, now: Instant) -> f32 {
+        now.duration_since(self.at).as_secs_f32() / HOLD.as_secs_f32()
+    }
+    /// Slid too far to still count as holding the same spot.
+    pub fn moved_away(&self, x: f32, y: f32) -> bool {
+        ((x - self.from.0).powi(2) + (y - self.from.1).powi(2)).sqrt() >= super::touch::TAP_MAX_MOVE
+    }
+}
 
 /// The touch target under (x, y): the innermost one (added last).
 pub fn hit(tree: &Tree, x: f32, y: f32) -> Option<usize> {
@@ -114,6 +146,7 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     let mut dark_fetch: Option<Instant> = None;
     let mut swallow = false; // the touch that woke the screen does nothing else
     let mut pressed: Option<(usize, Instant, Option<Nav>)> = None;
+    let mut holding: Option<Holding> = None;
     let mut shown: Option<(Tree, Option<usize>)> = None;
 
     while !signals::stopping() {
@@ -143,13 +176,31 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
                 }
                 continue;
             }
+            match ev {
+                Event::Down(x, y) => {
+                    holding = Holding::start(&current_tree(&app, fonts), x, y, now);
+                }
+                Event::Move(x, y) if holding.is_some_and(|h| h.moved_away(x, y)) => {
+                    holding = None;
+                }
+                Event::Up => holding = None,
+                _ => {}
+            }
             if let Some((x, y)) = taps.feed(ev, now) {
                 let tree = current_tree(&app, fonts);
-                if let Some(i) = hit(&tree, x, y) {
+                if let Some(i) = hit(&tree, x, y).filter(|i| !tree.items[*i].hold) {
                     eprintln!("pios ui: tap {} at {x:.0},{y:.0}", tree.items[i].name);
                     pressed = Some((i, now + PRESS_SHOWN, tree.items[i].nav));
                 }
             }
+        }
+        app.holding = holding.map(|h| h.progress(now).min(1.0));
+        if let Some(h) = holding
+            && now.duration_since(h.at) >= HOLD
+        {
+            holding = None;
+            eprintln!("pios ui: hold fired: {:?}", h.nav);
+            app.act(h.nav, &o.socket, now);
         }
 
         if !dark && now - last_touch >= o.idle {
@@ -157,6 +208,8 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             light.set(false);
             app.go(Nav::Home);
             pressed = None;
+            holding = None;
+            app.holding = None;
         }
 
         if let Some((_, until, nav)) = pressed
@@ -189,6 +242,9 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
         };
         if let Some((_, until, _)) = pressed {
             wait = wait.min(until.saturating_duration_since(now));
+        }
+        if holding.is_some() {
+            wait = wait.min(HOLD_FRAME);
         }
         poll_touch(
             touch.as_ref().map(|t| t.raw_fd()),

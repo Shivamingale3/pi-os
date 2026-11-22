@@ -40,6 +40,7 @@ curl --unix-socket data/pios.sock http://pios/now
 | `GET /incidents` | the last 7 days, newest first, without snapshots |
 | `GET /incidents/ID` | one incident with `snapshots.start`, `.peak` and `.end` |
 | `GET /details/TILE` | `cpu`, `temps`, `memory`, `disk` or `services`, collected on request (only while that screen is open) |
+| `POST /containers/ID/restart` | the screen's one action: restarts (or starts) a container from the latest snapshot, at most once a minute each; answers 202 at once, progress shows in `/details/services` |
 
 Trend metrics: `cpu.percent` · `cpu.tempC` · `mem.usedPercent` · `disk.usedPercent` · `load.1m` ·
 `net.rxBytesPerSec` · `net.txBytesPerSec`.
@@ -67,7 +68,8 @@ limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, bigges
 incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**:
 one tile per container, problems first (red: not running; amber: unhealthy, restarting or paused),
 9 per page; a tile opens the container (state, uptime or exit code, CPU and memory with its limit,
-image, Compose project, ports). Each screen has a 44 px back button.
+image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
+lifting or sliding away cancels, and a tap does nothing. Each screen has a 44 px back button.
 Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).
 
 Output goes to the panel (`--fb`), to a PNG, or to a laptop preview window, where a mouse click acts
@@ -105,7 +107,7 @@ binary and are installed by `pios setup`.
 | Unit | Runs as | What |
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
-| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true` and `GET /system/df`; anything else gets 403 |
+| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
 | `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
 `systemd-analyze security` rates the agent 1.0 ("OK"; it may read other processes' CPU use for the CPU screen), the helper 0.7 and the screen 0.8 ("SAFE").

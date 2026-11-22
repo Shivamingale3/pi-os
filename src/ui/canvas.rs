@@ -237,6 +237,19 @@ impl<'f> Canvas<'f> {
             .fill_path(path, &p, FillRule::Winding, Transform::identity(), None);
     }
 
+    /// `r` tinted with `c` at `alpha`, clipped to the rounded box `clip` (a hold's progress).
+    pub fn fill_alpha_clipped(&mut self, r: Rect, clip: Rect, radius: f32, c: Rgb, alpha: u8) {
+        let shape = rounded(clip, radius);
+        let mut mask = Mask::new(self.pm.width(), self.pm.height()).expect("mask");
+        mask.fill_path(&shape, FillRule::Winding, true, Transform::identity());
+        let mut p = paint(c);
+        p.set_color_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, alpha);
+        if let Some(sr) = SkRect::from_xywh(r.x, r.y, r.w, r.h) {
+            self.pm
+                .fill_rect(sr, &p, Transform::identity(), Some(&mask));
+        }
+    }
+
     /// `r` filled with `c`, clipped to the pill shape of `pill` (for segmented bars).
     pub fn fill_clipped(&mut self, r: Rect, pill: Rect, c: Rgb) {
         let shape = rounded(pill, pill.h / 2.0);

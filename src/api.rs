@@ -1,4 +1,4 @@
-//! Local API: HTTP/1.1 GET on a unix socket, one thread, one request per connection.
+//! Local API: HTTP/1.1 on a unix socket, one thread, one request per connection.
 //! Hand-written: 4 routes don't need an HTTP crate (no extra threads, no async runtime).
 //!
 //!   GET /now                  latest snapshot (503 until the first one)
@@ -6,6 +6,7 @@
 //!   GET /incidents            last 7 days, newest first, without snapshots
 //!   GET /incidents/ID         one incident with its start / peak / end snapshots
 //!   GET /details/TILE         cpu · temps · memory · disk · services, collected on request (screen open)
+//!   POST /containers/ID/restart   the screen's one action (202 at once; progress in /details/services)
 //!
 //! Try: curl --unix-socket data/pios.sock http://pios/now
 
@@ -78,9 +79,33 @@ fn handle(stream: &mut UnixStream, live: &Live, db: Option<&Connection>) -> std:
     let (status, body) = match req {
         http::Request::TooLarge => (431, json!({"error": "request too large"})),
         http::Request::Line { method, target } if method == "GET" => route(&target, live, db),
-        http::Request::Line { .. } => (405, json!({"error": "only GET"})),
+        http::Request::Line { method, target } if method == "POST" => action(&target, live),
+        http::Request::Line { .. } => (405, json!({"error": "only GET, or POST to restart"})),
     };
     http::respond(stream, status, &body.to_string())
+}
+
+/// The one action: POST /containers/ID/restart (from the screen's 2 s hold).
+pub fn action(target: &str, live: &Live) -> (u16, Value) {
+    let Some(id) = target
+        .strip_prefix("/containers/")
+        .and_then(|t| t.strip_suffix("/restart"))
+    else {
+        return (404, json!({"error": "POST /containers/ID/restart only"}));
+    };
+    let known: std::collections::HashMap<String, String> = live
+        .read()
+        .ok()
+        .and_then(|g| g.as_ref()?.docker.clone())
+        .map(|d| d.containers.into_iter().map(|c| (c.id, c.name)).collect())
+        .unwrap_or_default();
+    let helper = std::env::var_os("PIOS_DOCKER_SOCKET")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"));
+    let (status, msg) = crate::services::ask_restart(&helper, id, &known);
+    let key = if status < 300 { "status" } else { "error" };
+    (status, json!({ key: msg }))
 }
 
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {

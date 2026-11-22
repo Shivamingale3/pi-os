@@ -1722,7 +1722,25 @@ fn capitalized(s: &str) -> String {
         .unwrap_or_default()
 }
 
-pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loaded: bool) -> Tree {
+/// The Restart button's state, beyond what the agent reports.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Hold<'a> {
+    /// being held: 0–1 of the 2 s
+    pub progress: Option<f32>,
+    /// the agent refused or didn't answer the request
+    pub refused: Option<&'a str>,
+}
+
+pub const HOLD_SECS: f32 = 2.0;
+
+pub fn container(
+    f: &Fonts,
+    s: Option<&Service>,
+    cpu: &[f32],
+    mem: &[f32],
+    loaded: bool,
+    hold: Hold,
+) -> Tree {
     let mut b = B::new(f);
     let Some(s) = s else {
         if !loaded {
@@ -1734,7 +1752,12 @@ pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loade
         return b.t;
     };
     b.header(&s.name, "");
-    let st = service_status(s);
+    let pending = s.restart.as_ref().filter(|r| !r.done);
+    let st = if pending.is_some() {
+        Status::Attention
+    } else {
+        service_status(s)
+    };
     let sc = status_colors(st);
     let bad = st != Status::Good;
 
@@ -1752,16 +1775,22 @@ pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loade
         c,
         "value",
         Rect::new(r.x, r.y, r.w, 32.0),
-        &capitalized(&s.state),
+        &if pending.is_some() {
+            "Restarting".into()
+        } else {
+            capitalized(&s.state)
+        },
         "",
         if bad { sc.text } else { INK },
     );
-    let line1 = match (s.state.as_str(), s.up_sec, &s.ago) {
-        ("running" | "paused", Some(u), _) => format!("for {}", duration(u as i64 * 1000)),
-        (_, _, Some(a)) => a.clone(),
+    let line1 = match (pending, s.state.as_str(), s.up_sec, &s.ago) {
+        (Some(p), ..) => format!("you asked {} ago", duration(p.ago_sec as i64 * 1000)),
+        (_, "running" | "paused", Some(u), _) => format!("for {}", duration(u as i64 * 1000)),
+        (_, _, _, Some(a)) => a.clone(),
         _ => String::new(),
     };
     let (line2, c2) = match (&s.health, s.exit_code) {
+        _ if pending.is_some() => (String::new(), INK3),
         (Some(h), _) if s.state == "running" => {
             (h.clone(), if h == "unhealthy" { sc.text } else { INK3 })
         }
@@ -1855,7 +1884,7 @@ pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loade
     // container
     let (c, r) = b.card(
         "container",
-        Rect::new(M, TOP + 120.0 + GAP, WIDTH, 116.0),
+        Rect::new(M, TOP + 120.0 + GAP, 304.0, 116.0),
         "CONTAINER",
         "",
     );
@@ -1898,7 +1927,116 @@ pub fn container(f: &Fonts, s: Option<&Service>, cpu: &[f32], mem: &[f32], loade
         );
         y += 18.0 + MIN_GAP;
     }
+
+    restart_button(
+        &mut b,
+        s,
+        Rect::new(
+            M + 304.0 + GAP,
+            TOP + 120.0 + GAP,
+            WIDTH - 304.0 - GAP,
+            116.0,
+        ),
+        hold,
+    );
     b.t
+}
+
+/// Restart (running) or Start (stopped): hold 2 s. Greyed while one runs and for a minute after.
+fn restart_button(b: &mut B, s: &Service, r: Rect, hold: Hold) {
+    let running = s.state == "running";
+    let tone = if running {
+        status_colors(Status::Attention).shape
+    } else {
+        status_colors(Status::Good).shape
+    };
+    let verb = if running { "Restart" } else { "Start" };
+    let down_text = status_colors(Status::Down).text;
+    let left = |ago: u64| crate::services::RESTART_EVERY.as_secs().saturating_sub(ago);
+    let (enabled, label, sub, sub_color) = match (&s.restart, hold.progress, hold.refused) {
+        (Some(x), ..) if !x.done => (false, "Please wait".into(), "up to 30 s".into(), INK3),
+        (Some(x), ..) if x.error.is_none() => (
+            false,
+            "Restarted".to_string(),
+            format!("again in {} s", left(x.ago_sec).max(1)),
+            INK3,
+        ),
+        (_, Some(p), _) => (
+            true,
+            "Keep holding".into(),
+            format!("{:.1} s of 2", (p * HOLD_SECS).min(HOLD_SECS)),
+            INK3,
+        ),
+        (_, None, Some(why)) => (true, verb.into(), why.to_string(), down_text),
+        (Some(x), None, None) => (
+            true,
+            verb.into(),
+            format!("failed: {}", x.error.as_deref().unwrap_or("")),
+            down_text,
+        ),
+        _ => (true, verb.into(), "hold 2 s".into(), INK3),
+    };
+    let bt = b.t.add(
+        None,
+        "restart",
+        r,
+        Paint::Panel {
+            fill: theme::SURFACE,
+            radius: theme::RADIUS_TILE,
+            border: enabled.then_some(tone),
+        },
+    );
+    if enabled {
+        b.t.hold(bt, Nav::Restart(crate::services::key(&s.id)));
+    }
+    // the hold's bar is the layer the icon and text sit on
+    let bt = b.t.add(
+        Some(bt),
+        "progress",
+        r,
+        Paint::Progress {
+            frac: hold.progress.filter(|_| enabled).unwrap_or(0.0),
+            color: tone,
+            radius: theme::RADIUS_TILE,
+        },
+    );
+    b.t.pad(bt, PAD_TILE);
+    let inner = r.inset(PAD_TILE);
+    b.t.add(
+        Some(bt),
+        "icon",
+        Rect::new(inner.x + (inner.w - 28.0) / 2.0, inner.y + 6.0, 28.0, 28.0),
+        Paint::RestartIcon(if enabled { tone } else { INK3 }),
+    );
+    let ls = Style::new(Face::SemiBold, size::TITLE.0);
+    let label_w = b.f.width(&ls, &label).min(inner.w);
+    b.text(
+        bt,
+        "label",
+        Rect::new(
+            inner.x + (inner.w - label_w) / 2.0,
+            inner.y + 42.0,
+            label_w,
+            22.0,
+        ),
+        &label,
+        ls,
+        if enabled { INK } else { INK3 },
+    );
+    let sub_w = b.f.width(&small(), &sub).min(inner.w);
+    b.text(
+        bt,
+        "sub",
+        Rect::new(
+            inner.x + (inner.w - sub_w) / 2.0,
+            inner.y + 68.0,
+            sub_w,
+            16.0,
+        ),
+        &sub,
+        small(),
+        sub_color,
+    );
 }
 
 #[cfg(test)]

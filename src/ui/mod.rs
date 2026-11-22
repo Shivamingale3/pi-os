@@ -484,19 +484,36 @@ fn preview(a: &Args, socket: &Path, fonts: &Fonts) -> Result<()> {
     let mut buf = vec![0u32; (theme::W * theme::H) as usize];
     let mut was_down = false;
     let mut pressed: Option<(usize, Instant, Option<layout::Nav>)> = None;
+    let mut holding: Option<panel::Holding> = None;
     while win.is_open() && !win.is_key_down(Key::Escape) {
-        ap.update(socket, Instant::now());
+        let now = Instant::now();
+        ap.update(socket, now);
         let tree = tree_for(&ap, fonts);
         let down = win.get_mouse_down(minifb::MouseButton::Left);
+        let pos = win.get_mouse_pos(minifb::MouseMode::Discard);
         if down
             && !was_down
-            && let Some((x, y)) = win.get_mouse_pos(minifb::MouseMode::Discard)
-            && let Some(i) = panel::hit(&tree, x, y)
+            && let Some((x, y)) = pos
         {
-            println!("tap {} at {x:.0},{y:.0}", tree.items[i].name);
-            pressed = Some((i, Instant::now() + panel::PRESS_SHOWN, tree.items[i].nav));
+            holding = panel::Holding::start(&tree, x, y, now);
+            if holding.is_none()
+                && let Some(i) = panel::hit(&tree, x, y)
+            {
+                println!("tap {} at {x:.0},{y:.0}", tree.items[i].name);
+                pressed = Some((i, now + panel::PRESS_SHOWN, tree.items[i].nav));
+            }
+        }
+        if !down || pos.is_some_and(|(x, y)| holding.is_some_and(|h| h.moved_away(x, y))) {
+            holding = None;
         }
         was_down = down;
+        ap.holding = holding.map(|h| h.progress(now).min(1.0));
+        if let Some(h) = holding
+            && now.duration_since(h.at) >= panel::HOLD
+        {
+            holding = None;
+            ap.act(h.nav, socket, now);
+        }
         if let Some((_, until, nav)) = pressed
             && Instant::now() >= until
         {
