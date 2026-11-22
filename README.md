@@ -65,6 +65,20 @@ cargo build --release
 Dependencies: `rusqlite` (SQLite bundled), `serde`, `serde_json`, `libc`. No async runtime and no
 HTTP crate.
 
+## CI and releases
+
+- **CI** (`.github/workflows/ci.yml`), on every PR and every push to `main`: `cargo fmt --check`,
+  clippy (warnings are errors), tests, then a **static arm64 musl** build (`cargo zigbuild`). The
+  binary is kept as a workflow artifact for 14 days.
+- **Release** (`.github/workflows/release.yml`), when a `v*` tag is pushed: checks that the tag
+  matches the `Cargo.toml` version, runs the tests, builds the arm64 binary, and publishes a GitHub
+  release with `pios-aarch64-linux-musl` and `SHA256SUMS`.
+
+```bash
+# after bumping the version in Cargo.toml and merging:
+git tag v0.1.0 && git push origin v0.1.0
+```
+
 ## Layout
 
 | Path | What |
