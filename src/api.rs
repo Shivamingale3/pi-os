@@ -8,24 +8,20 @@
 //!
 //! Try: curl --unix-socket data/pios.sock http://pios/now
 
-use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
 use crate::error::{Result, err};
+use crate::http;
 use crate::store::{self, INCIDENT_KEEP_MS, TREND_METRICS, TREND_WINDOW_MS};
 use crate::types::{Snapshot, now_ms};
 
 pub type Live = Arc<RwLock<Option<Snapshot>>>;
-
-const MAX_REQUEST: usize = 8 * 1024;
-const IO_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Binds the socket. Refuses if another agent already answers on it; removes a stale one.
 pub fn bind(path: &Path) -> Result<UnixListener> {
@@ -66,66 +62,24 @@ pub fn serve(listener: UnixListener, live: Live, db_path: PathBuf) {
                 .map_err(|e| eprintln!("pios: api: {e}"))
                 .ok();
         }
-        if let Err(e) = handle(&mut stream, &live, db.as_ref()) {
-            // a client that hangs up or times out is not worth a log line
-            if !matches!(
-                e.kind(),
-                ErrorKind::BrokenPipe
-                    | ErrorKind::WouldBlock
-                    | ErrorKind::TimedOut
-                    | ErrorKind::ConnectionReset
-            ) {
-                eprintln!("pios: api: {e}");
-            }
+        if let Err(e) = handle(&mut stream, &live, db.as_ref())
+            && !http::is_client_gone(&e)
+        {
+            eprintln!("pios: api: {e}");
         }
     }
 }
 
 fn handle(stream: &mut UnixStream, live: &Live, db: Option<&Connection>) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
-    stream.set_write_timeout(Some(IO_TIMEOUT))?;
-
-    let mut buf = Vec::with_capacity(512);
-    let mut chunk = [0u8; 1024];
-    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
-        if buf.len() > MAX_REQUEST {
-            return respond(stream, 431, &json!({"error": "request too large"}));
-        }
-        let n = stream.read(&mut chunk)?;
-        if n == 0 {
-            return Ok(());
-        }
-        buf.extend_from_slice(&chunk[..n]);
-    }
-
-    let head = String::from_utf8_lossy(&buf);
-    let mut parts = head.lines().next().unwrap_or("").split_whitespace();
-    let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
-    let (status, body) = if method == "GET" {
-        route(target, live, db)
-    } else {
-        (405, json!({"error": "only GET"}))
+    let Some(req) = http::read_request(stream)? else {
+        return Ok(());
     };
-    respond(stream, status, &body)
-}
-
-fn respond(stream: &mut UnixStream, status: u16, body: &Value) -> std::io::Result<()> {
-    let reason = match status {
-        200 => "OK",
-        400 => "Bad Request",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        431 => "Request Header Fields Too Large",
-        503 => "Service Unavailable",
-        _ => "Internal Server Error",
+    let (status, body) = match req {
+        http::Request::TooLarge => (431, json!({"error": "request too large"})),
+        http::Request::Line { method, target } if method == "GET" => route(&target, live, db),
+        http::Request::Line { .. } => (405, json!({"error": "only GET"})),
     };
-    let body = body.to_string();
-    let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    stream.write_all(head.as_bytes())?;
-    stream.write_all(body.as_bytes())
+    http::respond(stream, status, &body.to_string())
 }
 
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {

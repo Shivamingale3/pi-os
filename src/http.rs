@@ -1,5 +1,6 @@
-//! Minimal HTTP/1.0 GET over a unix socket: used for Docker and by the UI to read the agent's API.
-//! HTTP/1.0 means the server sends a plain body and closes the connection, so we read to the end.
+//! Minimal HTTP over unix sockets, both sides, no HTTP crate.
+//!   client: one GET (HTTP/1.0: the server sends a plain body and closes, so we read to the end)
+//!   server: read one request line, write one response, close (the agent's API, the Docker helper)
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -40,6 +41,70 @@ pub fn parse_response(raw: &[u8]) -> Result<(u16, String)> {
         return Err(err("http: chunked response not supported"));
     }
     Ok((status, body.to_string()))
+}
+
+// ---------- server side ----------
+
+const MAX_REQUEST: usize = 8 * 1024;
+const IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+pub enum Request {
+    Line { method: String, target: String },
+    TooLarge,
+}
+
+/// Reads one request head. `None` = the client closed without sending one.
+pub fn read_request(stream: &mut UnixStream) -> std::io::Result<Option<Request>> {
+    stream.set_read_timeout(Some(IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(IO_TIMEOUT))?;
+    let mut buf = Vec::with_capacity(512);
+    let mut chunk = [0u8; 1024];
+    while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+        if buf.len() > MAX_REQUEST {
+            return Ok(Some(Request::TooLarge));
+        }
+        let n = stream.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(None);
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let mut parts = head.lines().next().unwrap_or("").split_whitespace();
+    Ok(Some(Request::Line {
+        method: parts.next().unwrap_or("").to_string(),
+        target: parts.next().unwrap_or("").to_string(),
+    }))
+}
+
+/// Writes a complete JSON response and lets the caller close the connection.
+pub fn respond(stream: &mut UnixStream, status: u16, json_body: &str) -> std::io::Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        431 => "Request Header Fields Too Large",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Internal Server Error",
+    };
+    let head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        json_body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(json_body.as_bytes())
+}
+
+/// Errors from a client that hung up or timed out aren't worth a log line.
+pub fn is_client_gone(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::*;
+    matches!(
+        e.kind(),
+        BrokenPipe | WouldBlock | TimedOut | ConnectionReset
+    )
 }
 
 #[cfg(test)]

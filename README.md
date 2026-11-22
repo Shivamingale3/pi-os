@@ -85,6 +85,35 @@ Tests run the check on more than 5,000 combinations of extreme data (long hostna
 1023 GB, 120 containers, 12 open problems) and compare each example with a golden PNG in
 `tests/golden/`. After an intended visual change, run `UPDATE_GOLDEN=1 cargo test`.
 
+## On the Pi
+
+PiOS runs **natively as systemd services**, with no container. All the files below ship inside the
+binary and are installed by `pios setup`.
+
+| Unit | Runs as | What |
+|---|---|---|
+| `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
+| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`; anything else gets 403 |
+
+`systemd-analyze security` rates the agent 0.8 and the helper 0.7 ("SAFE").
+
+```bash
+# first install, as root: download a release, check it, install
+curl -fsSLO https://github.com/Shivamingale3/pi-os/releases/download/v0.2.0/pios-aarch64-linux-musl
+curl -fsSLO https://github.com/Shivamingale3/pi-os/releases/download/v0.2.0/SHA256SUMS
+sha256sum -c SHA256SUMS && install -m 0755 pios-aarch64-linux-musl /usr/local/bin/pios
+pios setup                       # users pios + pios-deploy, units, sudoers line; starts the agent
+
+pios update v0.3.0               # later: download, checksum, swap, health check, auto-rollback
+pios update --rollback           # back to the previous binary
+pios uninstall [--keep-data]     # remove everything setup created
+```
+
+**Deploys from Jenkins** (`deploy/Jenkinsfile`): GitHub's "release published" webhook triggers a
+job that SSHes to `pios-deploy` with a key restricted to `pios deploy-ssh`. That command accepts only
+`update vX.Y.Z` or `rollback`, and runs `sudo pios update` (the only sudo rule: `deploy/sudoers-pios-deploy`).
+`pios setup --deploy-key key.pub` installs that key.
+
 ## Build
 
 ```bash
@@ -120,6 +149,9 @@ git tag v0.1.0 && git push origin v0.1.0
 | `src/api.rs` | the HTTP server on the unix socket |
 | `src/http.rs` | the small HTTP client for unix sockets (Docker, the agent's API) |
 | `src/ui/` | the screens: `theme` (tokens and spacing rules), `canvas` (drawing), `layout` (box tree, check, render), `home` |
+| `src/helper.rs` | the root helper: filtered Docker access |
+| `src/setup.rs`, `src/update.rs` | install, update with rollback, uninstall, the deploy-key command |
+| `deploy/` | systemd units, the sudoers line, the Jenkinsfile |
 | `src/main.rs` | CLI, the loop, signal handling |
 
 ## License

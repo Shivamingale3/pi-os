@@ -1,0 +1,63 @@
+// PiOS deploy: a GitHub "release published" webhook installs that release on the Pi.
+//
+// Lives in the public repo, so it holds no secrets and no addresses. The Jenkins side needs:
+//   credential  pios-webhook-token  (Secret text) the token GitHub's webhook calls with
+//   files       /var/jenkins_home/.ssh/pios_deploy      the deploy key (its public half is the
+//                                                       only key `pios-deploy` accepts, and it
+//                                                       can only run `pios deploy-ssh`)
+//               /var/jenkins_home/.ssh/known_hosts_pios the Pi's host key, pinned
+//   optional    env PIOS_DEPLOY_HOST, else the container's default gateway (the Docker host)
+//
+// Build with Parameters: `tag` = vX.Y.Z to (re)deploy by hand; `rollback` = back to the previous binary.
+
+pipeline {
+    agent any
+    options {
+        disableConcurrentBuilds()
+        timeout(time: 10, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+    parameters {
+        string(name: 'tag', defaultValue: '', description: 'Release tag to deploy, e.g. v0.2.0 (the webhook fills it in)')
+        booleanParam(name: 'rollback', defaultValue: false, description: 'Roll back to the previous binary instead')
+    }
+    triggers {
+        GenericTrigger(
+            genericVariables: [
+                [key: 'action', value: '$.action'],
+                [key: 'tag', value: '$.release.tag_name'],
+                [key: 'repo', value: '$.repository.full_name'],
+            ],
+            tokenCredentialId: 'pios-webhook-token',
+            regexpFilterText: '$action $repo',
+            regexpFilterExpression: '^published Shivamingale3/pi-os$',
+            causeString: 'GitHub release $tag',
+            printContributedVariables: true
+        )
+    }
+    stages {
+        stage('Deploy') {
+            steps {
+                sh '''#!/bin/sh
+                    set -eu
+                    if [ "${rollback:-false}" = "true" ]; then
+                        what="rollback"
+                    else
+                        echo "$tag" | grep -Eq '^v[0-9]{1,6}\\.[0-9]{1,6}\\.[0-9]{1,6}$' || { echo "not a release tag: '$tag'"; exit 1; }
+                        what="update $tag"
+                    fi
+                    host="${PIOS_DEPLOY_HOST:-}"
+                    if [ -z "$host" ]; then
+                        gw=$(awk '$2 == "00000000" { print $3; exit }' /proc/net/route)
+                        host=$(printf '%d.%d.%d.%d' "0x$(echo "$gw" | cut -c7-8)" "0x$(echo "$gw" | cut -c5-6)" "0x$(echo "$gw" | cut -c3-4)" "0x$(echo "$gw" | cut -c1-2)")
+                    fi
+                    echo "deploying: $what"
+                    ssh -i /var/jenkins_home/.ssh/pios_deploy \
+                        -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 \
+                        -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/var/jenkins_home/.ssh/known_hosts_pios \
+                        "pios-deploy@$host" "$what"
+                '''
+            }
+        }
+    }
+}

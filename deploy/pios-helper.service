@@ -1,0 +1,45 @@
+# Root, started by pios-helper.socket. Forwards exactly one read-only request to Docker
+# (GET /containers/json?all=true) and refuses everything else.
+[Unit]
+Description=PiOS helper (filtered Docker access)
+Requires=pios-helper.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pios helper
+Environment=PIOS_DOCKER_SOCKET=/var/run/docker.sock
+
+Nice=10
+CPUQuota=5%
+MemoryMax=16M
+TasksMax=4
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+ProtectProc=invisible
+ProcSubset=pid
+IPAddressDeny=any
+PrivateUsers=no
+RemoveIPC=yes
+KeyringMode=private
