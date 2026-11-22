@@ -98,6 +98,14 @@ fn good_temps() -> TempDetails {
             step: 0,
             steps: 4,
             starts_at: Some(50.0),
+            trips: vec![50.0, 60.0, 67.5, 75.0],
+        }),
+        case_fan: Some(CaseFan {
+            duty: 60.0,
+            controller: true,
+            min_duty: 60.0,
+            nvme: (55.0, 72.0),
+            cpu: (60.0, 80.0),
         }),
     }
 }
@@ -301,6 +309,15 @@ fn worst_temps() -> TempDetails {
             step: 4,
             steps: 4,
             starts_at: Some(50.0),
+            trips: vec![50.0, 60.0, 67.5, 75.0, 80.0, 85.0, 90.0, 95.0],
+        }),
+        // fan_ctl stopped: the fan sits at 100 %
+        case_fan: Some(CaseFan {
+            duty: 100.0,
+            controller: false,
+            min_duty: 0.0,
+            nvme: (55.0, 72.0),
+            cpu: (60.0, 80.0),
         }),
     }
 }
@@ -849,6 +866,7 @@ mod tests {
                         step: 9,
                         steps: 0,
                         starts_at: None,
+                        trips: vec![],
                     }),
                 ] {
                     let mut t = all.clone();
@@ -1097,6 +1115,96 @@ mod tests {
             assert!(rows.len() <= crate::ui::screens::EVENT_ROWS);
             assert!(rows.iter().all(|e| &crate::ui::utc_at(e.ts).1 == day));
         }
+    }
+
+    #[test]
+    fn fans_and_ring_never_collide() {
+        use crate::ui::ring::{ATTENTION, DOWN, GOOD, Settings};
+        let f = Fonts::load();
+        for base in ["good", "worst"] {
+            let all = sample_app(base, Screen::Fans).unwrap().temps.unwrap();
+            for case in [
+                None,
+                all.case_fan.clone(),
+                all.case_fan.clone().map(|mut c| {
+                    c.controller = !c.controller;
+                    c
+                }),
+            ] {
+                for cooler in [None, all.fan.clone()] {
+                    for sensors in [0, all.sensors.len()] {
+                        let mut a = sample_app(base, Screen::Fans).unwrap();
+                        let mut t = all.clone();
+                        (t.case_fan, t.fan) = (case.clone(), cooler.clone());
+                        t.sensors.truncate(sensors);
+                        a.temps = Some(t.clone());
+                        let v = layout::check(&tree(&a, &f));
+                        assert!(v.is_empty(), "{base} fans: {v:#?}");
+                        a.screen = Some(Screen::Temps);
+                        let v = layout::check(&tree(&a, &f));
+                        assert!(v.is_empty(), "{base} temps fan card: {v:#?}");
+                    }
+                }
+            }
+        }
+        let mut a = sample_app("good", Screen::Ring).unwrap();
+        for g in GOOD {
+            for at in ATTENTION {
+                for d in DOWN {
+                    for br in 0..3 {
+                        a.ring = Settings {
+                            good: g,
+                            attention: at,
+                            down: d,
+                            brightness: br,
+                        };
+                        for s in [Screen::Ring, Screen::Settings] {
+                            a.screen = Some(s);
+                            let v = layout::check(&tree(&a, &f));
+                            assert!(v.is_empty(), "{s:?} {:?}: {v:#?}", a.ring);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn menu_ring_and_fans_navigation() {
+        use crate::ui::ring::Pattern;
+        let f = Fonts::load();
+        let tap = |a: &mut App, name: &str| {
+            let t = tree(a, &f);
+            let (x, y) = panel::centre(&t, name);
+            let nav = t.items[panel::hit(&t, x, y).unwrap()].nav.unwrap();
+            a.go(nav);
+        };
+        let mut a = sample_app("good", Screen::Home).unwrap();
+        tap(&mut a, "menu");
+        assert_eq!(a.screen(), Screen::Settings);
+        tap(&mut a, "LED ring");
+        assert_eq!(a.screen(), Screen::Ring);
+        tap(&mut a, "Steady"); // the first "Steady" row: All good
+        assert_eq!(a.ring.good, Pattern::Steady);
+        assert!(a.ring_preview.is_some(), "a choice plays on the ring");
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Settings);
+        tap(&mut a, "Fans");
+        assert_eq!(a.screen(), Screen::Fans);
+        tap(&mut a, "back");
+        assert_eq!(
+            a.screen(),
+            Screen::Settings,
+            "back goes where Fans was opened from"
+        );
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Home);
+        // Temperatures' fan card opens Fans, and back returns there
+        a.go(Nav::Temps);
+        tap(&mut a, "fan");
+        assert_eq!(a.screen(), Screen::Fans);
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Temps);
     }
 
     #[test]

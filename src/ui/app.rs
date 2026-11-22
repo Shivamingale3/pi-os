@@ -23,6 +23,9 @@ pub enum Screen {
     Incident(i64),
     Services,
     Container(u64),
+    Fans,
+    Settings,
+    Ring,
 }
 
 impl Screen {
@@ -37,6 +40,9 @@ impl Screen {
             "incident" => Screen::Incident(1),
             "services" | "host" | "web" => Screen::Services,
             "events" => Screen::History,
+            "fans" => Screen::Fans,
+            "settings" => Screen::Settings,
+            "ring" => Screen::Ring,
             "container" => Screen::Container(0),
             _ => return None,
         })
@@ -61,7 +67,7 @@ pub fn hist_tab_for(name: &str) -> screens::HistTab {
     }
 }
 
-pub const SCREENS: [&str; 12] = [
+pub const SCREENS: [&str; 15] = [
     "home",
     "cpu",
     "temps",
@@ -74,6 +80,9 @@ pub const SCREENS: [&str; 12] = [
     "host",
     "web",
     "container",
+    "fans",
+    "settings",
+    "ring",
 ];
 
 /// The refresh icon spins at least this long, so a fast fetch is still seen to happen.
@@ -112,6 +121,12 @@ pub struct App {
     /// History's open tab, and the Events tab's data
     pub hist_tab: screens::HistTab,
     pub events: Option<Vec<crate::events::Event>>,
+    /// the LED ring's choices, where they're saved, and a pattern being previewed
+    pub ring: super::ring::Settings,
+    pub ring_path: Option<std::path::PathBuf>,
+    pub ring_preview: Option<(super::ring::Role, super::ring::Pattern, Instant)>,
+    /// where Fans' back button goes (Temperatures or Settings)
+    fans_from: Option<Screen>,
     /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
     pub refreshing: Option<Instant>,
     last: HashMap<&'static str, Instant>,
@@ -221,9 +236,42 @@ impl App {
                 self.last.remove("incident");
                 Screen::Incident(id)
             }
+            Nav::Fans => {
+                self.fans_from = Some(self.screen());
+                Screen::Fans
+            }
+            Nav::Settings => Screen::Settings,
+            Nav::Ring => Screen::Ring,
+            Nav::RingSet(row, choice) => {
+                use super::ring::{ATTENTION, BRIGHTNESS, DOWN, GOOD, Role};
+                let c = (choice as usize).min(2);
+                let preview = match row {
+                    0 => {
+                        self.ring.good = GOOD[c];
+                        Some((Role::Good, GOOD[c]))
+                    }
+                    1 => {
+                        self.ring.attention = ATTENTION[c];
+                        Some((Role::Attention, ATTENTION[c]))
+                    }
+                    2 => {
+                        self.ring.down = DOWN[c];
+                        Some((Role::Down, DOWN[c]))
+                    }
+                    _ => {
+                        self.ring.brightness = c.min(BRIGHTNESS.len() - 1);
+                        Some((Role::Attention, self.ring.attention))
+                    }
+                };
+                self.ring.save(self.ring_path.as_deref());
+                self.ring_preview = preview.map(|(r, p)| (r, p, Instant::now()));
+                Screen::Ring
+            }
             Nav::Back => match self.screen() {
                 Screen::Incident(_) => Screen::History,
                 Screen::Container(_) => Screen::Services,
+                Screen::Fans => self.fans_from.take().unwrap_or(Screen::Temps),
+                Screen::Ring => Screen::Settings,
                 _ => Screen::Home,
             },
         };
@@ -262,6 +310,8 @@ impl App {
             Screen::History => v.push(("incidents", s(10))),
             Screen::Incident(_) => v.push(("incident", s(10))),
             Screen::Services => v.push(("services", s(5))),
+            Screen::Fans => v.push(("temps", s(5))),
+            Screen::Settings | Screen::Ring => {}
             Screen::Container(_) => v.push(("services", s(3))),
         }
         v
@@ -477,6 +527,9 @@ impl App {
             Screen::Services => {
                 screens::services(f, self.services.as_ref(), self.tab, self.page, at)
             }
+            Screen::Fans => screens::fans(f, self.temps.as_ref()),
+            Screen::Settings => screens::settings(f, &self.ring),
+            Screen::Ring => screens::ring_screen(f, &self.ring),
             Screen::Container(_) => {
                 let cpu: Vec<f32> = self.svc_cpu.iter().copied().collect();
                 let mem: Vec<f32> = self.svc_mem.iter().copied().collect();

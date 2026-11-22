@@ -69,6 +69,91 @@ pub struct Fan {
     pub step: u32,
     pub steps: u32,
     pub starts_at: Option<f64>,
+    /// every active trip point (°C), coolest first: where each speed step begins
+    #[serde(default)]
+    pub trips: Vec<f64>,
+}
+
+/// The case fan run by fan_ctl (github.com/Shivamingale3/fan_ctl): read-only, PiOS never
+/// drives it. The hotter of NVMe and CPU, each on its own curve, decides its speed.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseFan {
+    /// current PWM duty, %
+    pub duty: f64,
+    /// fan_ctl.service is running (stopped or crashed, it leaves the fan at 100 %)
+    pub controller: bool,
+    pub min_duty: f64,
+    pub nvme: (f64, f64),
+    pub cpu: (f64, f64),
+}
+
+impl CaseFan {
+    /// The duty one sensor asks for on its curve (fan_ctl's rule, without its 5 % steps).
+    pub fn wants(&self, (start, full): (f64, f64), t: f64) -> f64 {
+        let x = ((t - start) / (full - start).max(0.1)).clamp(0.0, 1.0);
+        self.min_duty + (100.0 - self.min_duty) * x
+    }
+}
+
+/// fan_ctl's defaults, overridden by /etc/fan_ctl.conf (`key = value`, # comments).
+pub fn fan_ctl_config(text: Option<&str>) -> (String, u32, f64, (f64, f64), (f64, f64)) {
+    let (mut dev, mut ch, mut min) = ("pwm_pio".to_string(), 0u32, 60.0);
+    let (mut nvme, mut cpu) = ((55.0, 72.0), (60.0, 80.0));
+    for line in text.unwrap_or("").lines() {
+        let line = line.split('#').next().unwrap_or("");
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let (k, v) = (k.trim(), v.trim());
+        let f = v.parse::<f64>().ok();
+        match (k, f) {
+            ("pwm_device", _) if !v.is_empty() => dev = v.to_string(),
+            ("pwm_channel", Some(x)) => ch = x as u32,
+            ("min_duty", Some(x)) => min = x,
+            ("nvme_start", Some(x)) => nvme.0 = x,
+            ("nvme_full", Some(x)) => nvme.1 = x,
+            ("cpu_start", Some(x)) => cpu.0 = x,
+            ("cpu_full", Some(x)) => cpu.1 = x,
+            _ => {}
+        }
+    }
+    (dev, ch, min, nvme, cpu)
+}
+
+fn case_fan() -> Option<CaseFan> {
+    let conf = std::fs::read_to_string("/etc/fan_ctl.conf").ok();
+    let (dev, ch, min_duty, nvme, cpu) = fan_ctl_config(conf.as_deref());
+    for e in std::fs::read_dir("/sys/class/pwm").ok()?.flatten() {
+        let chip = e.path();
+        let Ok(d) = std::fs::canonicalize(chip.join("device")) else {
+            continue;
+        };
+        if !d.to_string_lossy().contains(&dev) {
+            continue;
+        }
+        let p = chip.join(format!("pwm{ch}"));
+        let read = |f: &str| -> Option<f64> {
+            std::fs::read_to_string(p.join(f)).ok()?.trim().parse().ok()
+        };
+        let (duty, period) = (read("duty_cycle")?, read("period")?);
+        let controller =
+            std::fs::read_to_string("/sys/fs/cgroup/system.slice/fan_ctl.service/cgroup.events")
+                .map(|e| crate::checks::populated(&e))
+                .unwrap_or(false);
+        return Some(CaseFan {
+            duty: if period > 0.0 {
+                duty / period * 100.0
+            } else {
+                0.0
+            },
+            controller,
+            min_duty,
+            nvme,
+            cpu,
+        });
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -76,6 +161,9 @@ pub struct Fan {
 pub struct TempDetails {
     pub sensors: Vec<Sensor>,
     pub fan: Option<Fan>,
+    /// fan_ctl's case fan, if there is one
+    #[serde(default)]
+    pub case_fan: Option<CaseFan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -283,6 +371,7 @@ pub fn sensor_name(chip: &str) -> Option<(&'static str, u8)> {
 pub fn temps() -> Result<TempDetails> {
     // CPU trip points: the first "active" one is where the fan starts
     let mut fan_on = None;
+    let mut trips: Vec<f64> = Vec::new();
     if let Ok(zones) = std::fs::read_dir("/sys/class/thermal") {
         for z in zones.flatten() {
             let p = z.path();
@@ -297,6 +386,7 @@ pub fn temps() -> Result<TempDetails> {
                     && let Some(t) = read_milli(&p.join(format!("trip_point_{i}_temp")))
                 {
                     fan_on = Some(fan_on.map_or(t, |f: f64| f.min(t)));
+                    trips.push(t);
                 }
             }
         }
@@ -320,6 +410,10 @@ pub fn temps() -> Result<TempDetails> {
                     step: 0,
                     steps: 0,
                     starts_at: fan_on,
+                    trips: {
+                        trips.sort_by(f64::total_cmp);
+                        trips.clone()
+                    },
                 });
                 continue;
             }
@@ -371,6 +465,7 @@ pub fn temps() -> Result<TempDetails> {
     Ok(TempDetails {
         sensors: found.into_iter().map(|(_, s)| s).collect(),
         fan,
+        case_fan: case_fan(),
     })
 }
 
@@ -803,6 +898,27 @@ mod tests {
         assert!(parse_docker_df("not json").is_err());
         let shared = r#"{"LayersSize":100,"Images":[{"Size":80,"Containers":0},{"Size":80,"Containers":0}]}"#;
         assert_eq!(parse_docker_df(shared).unwrap().reclaimable, 100);
+    }
+
+    #[test]
+    fn fan_ctl_curve() {
+        let d = fan_ctl_config(None);
+        assert_eq!(
+            (d.0.as_str(), d.1, d.2, d.3, d.4),
+            ("pwm_pio", 0, 60.0, (55.0, 72.0), (60.0, 80.0))
+        );
+        let c = fan_ctl_config(Some("# x\nmin_duty = 0\nnvme_full=70 # hot\nbogus\n"));
+        assert_eq!((c.2, c.3), (0.0, (55.0, 70.0)));
+        let f = CaseFan {
+            duty: 60.0,
+            controller: true,
+            min_duty: 60.0,
+            nvme: (55.0, 72.0),
+            cpu: (60.0, 80.0),
+        };
+        assert_eq!(f.wants(f.nvme, 40.0), 60.0);
+        assert_eq!(f.wants(f.nvme, 72.0), 100.0);
+        assert!((f.wants(f.cpu, 70.0) - 80.0).abs() < 1e-9);
     }
 
     #[test]

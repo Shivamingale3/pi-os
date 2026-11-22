@@ -15,6 +15,7 @@ pub mod fb;
 pub mod home;
 pub mod layout;
 pub mod panel;
+pub mod ring;
 pub mod samples;
 pub mod screens;
 pub mod theme;
@@ -550,6 +551,16 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
                     .map(PathBuf::from),
                 idle: Duration::from_secs(idle_min.max(1) * 60),
                 socket: socket.to_path_buf(),
+                ring_device: std::env::var("PIOS_RING_DEVICE")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
+                ring_channel: std::env::var("PIOS_RING_CHANNEL")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1),
+                state_dir: std::env::var_os("PIOS_UI_STATE")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from),
             },
             &fonts,
         )?;

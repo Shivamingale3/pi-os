@@ -13,8 +13,9 @@ use serde::Deserialize;
 
 use super::canvas::{Face, Fonts, Style};
 use super::layout::{Marker, Nav, Paint, Rect, Tree};
+use super::ring;
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
-use crate::details::{CpuDetails, DiskDetails, MemDetails, TempDetails};
+use crate::details::{CaseFan, CpuDetails, DiskDetails, MemDetails, TempDetails};
 use crate::events::Event;
 use crate::rules::THRESHOLDS;
 use crate::services::{Service, Services};
@@ -688,11 +689,54 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
     let (c, r) = b.card(
         "fan",
         Rect::new(M + 304.0 + GAP, TOP + 136.0, WIDTH - 304.0 - GAP, 108.0),
-        "FAN",
-        "",
+        if d.case_fan.is_some() { "FANS" } else { "FAN" },
+        "›",
     );
-    match &d.fan {
-        Some(fan) => {
+    // the whole card opens the Fans screen
+    b.t.nav(c, Nav::Fans);
+    match (&d.case_fan, &d.fan) {
+        (Some(cf), cooler) => {
+            b.value(
+                c,
+                "value",
+                Rect::new(r.x, r.y, r.w, 32.0),
+                &format!("{:.0}", cf.duty),
+                "%",
+                if cf.controller {
+                    INK
+                } else {
+                    status_colors(Status::Attention).text
+                },
+            );
+            let bar = b.t.add(
+                Some(c),
+                "duty",
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 8.0),
+                Paint::Bar {
+                    pct: (cf.duty / 100.0) as f32,
+                    track: theme::TRACK,
+                    fill: INK2,
+                },
+            );
+            let _ = bar;
+            let cap = match (cf.controller, cooler) {
+                (false, _) => "case fan · fan_ctl stopped".to_string(),
+                (true, Some(f)) if f.step > 0 || f.rpm.unwrap_or(0) > 0 => {
+                    "case fan · cooler on".into()
+                }
+                (true, Some(_)) => "case fan · cooler off".into(),
+                (true, None) => "case fan".into(),
+            };
+            b.text(
+                c,
+                "caption",
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP, r.w, 16.0),
+                &cap,
+                small(),
+                INK3,
+            );
+        }
+        (None, Some(fan)) => {
             let on = fan.step > 0 || fan.rpm.unwrap_or(0) > 0;
             b.value(
                 c,
@@ -727,7 +771,7 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                 INK3,
             );
         }
-        None => {
+        (None, None) => {
             b.value(c, "value", Rect::new(r.x, r.y, r.w, 32.0), "None", "", INK2);
             b.text(
                 c,
@@ -2530,6 +2574,379 @@ fn restart_button(b: &mut B, s: &Service, r: Rect, hold: Hold) {
         small(),
         sub_color,
     );
+}
+
+// ---------------- Fans ----------------
+
+/// "the hotter one decides": which sensor fan_ctl follows right now, in words.
+fn case_fan_reason(cf: &CaseFan, nvme: Option<f64>, cpu: Option<f64>) -> String {
+    if !cf.controller {
+        return "fan_ctl isn’t running: full speed".into();
+    }
+    let n = nvme.map(|t| cf.wants(cf.nvme, t)).unwrap_or(0.0);
+    let c = cpu.map(|t| cf.wants(cf.cpu, t)).unwrap_or(0.0);
+    if n.max(c) <= cf.min_duty + 0.01 {
+        return "at its floor: all cool".into();
+    }
+    match (n >= c, nvme, cpu) {
+        (true, Some(t), _) => format!("following the NVMe, {t:.0} °C"),
+        (false, _, Some(t)) => format!("following the CPU, {t:.0} °C"),
+        _ => String::new(),
+    }
+}
+
+pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
+    let mut b = B::new(f);
+    let Some(d) = d else {
+        return reading(&mut b, "Fans");
+    };
+    b.header("Fans", "");
+    let temp = |name: &str| d.sensors.iter().find(|s| s.name == name).map(|s| s.celsius);
+    let (nvme, cpu) = (temp("NVMe"), temp("CPU"));
+
+    // case fan (fan_ctl)
+    let (c, r) = b.card(
+        "case",
+        Rect::new(M, TOP, 262.0, 136.0),
+        "CASE FAN",
+        match &d.case_fan {
+            Some(cf) if cf.controller => "fan_ctl · running",
+            Some(_) => "fan_ctl · stopped",
+            None => "",
+        },
+    );
+    match &d.case_fan {
+        Some(cf) => {
+            let warn = !cf.controller;
+            let tone = if warn {
+                status_colors(Status::Attention).text
+            } else {
+                INK
+            };
+            b.value(
+                c,
+                "value",
+                Rect::new(r.x, r.y, r.w, 32.0),
+                &format!("{:.0}", cf.duty),
+                "%",
+                tone,
+            );
+            b.t.add(
+                Some(c),
+                "duty",
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 10.0),
+                Paint::Bar {
+                    pct: (cf.duty / 100.0) as f32,
+                    track: theme::TRACK,
+                    fill: if warn {
+                        status_colors(Status::Attention).shape
+                    } else {
+                        INK2
+                    },
+                },
+            );
+            let y = r.y + 32.0 + MIN_GAP + 10.0 + MIN_GAP;
+            b.text(
+                c,
+                "reason",
+                Rect::new(r.x, y, r.w, 18.0),
+                &case_fan_reason(cf, nvme, cpu),
+                body(),
+                if warn { tone } else { INK2 },
+            );
+            b.text(
+                c,
+                "curve",
+                Rect::new(r.x, y + 18.0 + MIN_GAP, r.w, 16.0),
+                &format!(
+                    "{:.0} % floor · 100 % at {:.0} / {:.0} °C",
+                    cf.min_duty, cf.nvme.1, cf.cpu.1
+                ),
+                small(),
+                INK3,
+            );
+        }
+        None => b.note(c, r, "No case fan (fan_ctl) found"),
+    }
+
+    // Active Cooler
+    let (c, r) = b.card(
+        "cooler",
+        Rect::new(M + 262.0 + GAP, TOP, WIDTH - 262.0 - GAP, 136.0),
+        "ACTIVE COOLER",
+        "",
+    );
+    match &d.fan {
+        Some(fan) => {
+            let on = fan.step > 0 || fan.rpm.unwrap_or(0) > 0;
+            b.value(
+                c,
+                "value",
+                Rect::new(r.x, r.y, r.w, 32.0),
+                if on { "On" } else { "Off" },
+                "",
+                INK,
+            );
+            let steps = fan.steps.max(1);
+            b.t.add(
+                Some(c),
+                "steps",
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 8.0),
+                Paint::Steps {
+                    n: steps,
+                    on: fan.step.min(steps),
+                    on_color: INK2,
+                    off_color: theme::TRACK,
+                },
+            );
+            let y = r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP;
+            b.text(
+                c,
+                "rpm",
+                Rect::new(r.x, y, r.w, 18.0),
+                &format!("{} rpm", fan.rpm.unwrap_or(0)),
+                body(),
+                INK2,
+            );
+            let trips: Vec<String> = fan
+                .trips
+                .iter()
+                .map(|t| {
+                    if t.fract() == 0.0 {
+                        format!("{t:.0}")
+                    } else {
+                        format!("{t:.1}")
+                    }
+                })
+                .collect();
+            if !trips.is_empty() {
+                b.text(
+                    c,
+                    "trips",
+                    Rect::new(r.x, y + 18.0 + MIN_GAP, r.w, 16.0),
+                    &format!("steps {} °C", trips.join(" · ")),
+                    small(),
+                    INK3,
+                );
+            }
+        }
+        None => b.note(c, r, "No Active Cooler"),
+    }
+
+    // what drives the case fan
+    let (c, r) = b.card(
+        "drive",
+        Rect::new(M, TOP + 136.0 + GAP, WIDTH, 100.0),
+        "WHAT DRIVES THE CASE FAN",
+        "the hotter one decides",
+    );
+    match &d.case_fan {
+        Some(cf) => {
+            let (lo, hi) = (30.0_f64, 90.0_f64);
+            let at = |v: f64| ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
+            let mut y = r.y + 2.0;
+            for (name, t, (start, full)) in [("NVMe", nvme, cf.nvme), ("CPU", cpu, cf.cpu)] {
+                let row =
+                    b.t.add(Some(c), name, Rect::new(r.x, y, r.w, 22.0), Paint::None);
+                b.text(
+                    row,
+                    "name",
+                    Rect::new(r.x, y, 48.0, 22.0),
+                    name,
+                    body(),
+                    INK2,
+                );
+                let v = t
+                    .map(|t| format!("{t:.1} °C"))
+                    .unwrap_or_else(|| "—".into());
+                let vw = 72.0;
+                b.text_right(
+                    row,
+                    "value",
+                    Rect::new(r.right() - vw, y, vw, 22.0),
+                    &v,
+                    mono(),
+                    INK,
+                );
+                let gx = r.x + 48.0 + GAP;
+                b.t.add(
+                    Some(row),
+                    "gauge",
+                    Rect::new(gx, y + 5.0, r.right() - vw - GAP - gx, 12.0),
+                    Paint::Gauge {
+                        pct: t.map(at).unwrap_or(0.0),
+                        track: theme::TRACK,
+                        fill: INK2,
+                        marks: vec![
+                            (at(start), INK3),
+                            (at(full), status_colors(Status::Attention).shape),
+                        ],
+                    },
+                );
+                y += 22.0 + GAP;
+            }
+        }
+        None => b.note(c, r, "fan_ctl isn’t installed"),
+    }
+    b.t
+}
+
+// ---------------- Settings ----------------
+
+pub fn settings(f: &Fonts, ring: &ring::Settings) -> Tree {
+    let mut b = B::new(f);
+    b.header("Settings", "");
+    let rows = [
+        (
+            "LED ring",
+            format!(
+                "{} · {} · {} · {}",
+                ring.good.label(),
+                ring.attention.label(),
+                ring.down.label(),
+                ring::BRIGHTNESS[ring.brightness.min(2)].0
+            ),
+            Nav::Ring,
+        ),
+        ("Fans", "case fan and Active Cooler".to_string(), Nav::Fans),
+    ];
+    let name_style = Style::new(Face::SemiBold, size::TITLE.0);
+    for (i, (name, sub, nav)) in rows.into_iter().enumerate() {
+        let r = Rect::new(M, TOP + i as f32 * (54.0 + GAP), WIDTH, 54.0);
+        let row = b.t.add(
+            None,
+            name,
+            r,
+            Paint::Panel {
+                fill: theme::SURFACE,
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        b.t.nav(row, nav);
+        b.t.pad(row, PAD_TILE);
+        let inner = r.inset(PAD_TILE);
+        let nw = b.f.width(&name_style, name);
+        b.text(
+            row,
+            "name",
+            Rect::new(inner.x, inner.y, nw, inner.h),
+            name,
+            name_style,
+            INK,
+        );
+        let sx = inner.x + nw + GAP;
+        b.text_right(
+            row,
+            "summary",
+            Rect::new(sx, inner.y, inner.right() - 20.0 - GAP - sx, inner.h),
+            &sub,
+            body(),
+            INK3,
+        );
+        b.t.add(
+            Some(row),
+            "chevron",
+            Rect::new(inner.right() - 20.0, inner.cy() - 10.0, 20.0, 20.0),
+            Paint::Chevron(INK3, true),
+        );
+    }
+    b.t
+}
+
+/// The LED ring screen: one row per state, three choices each; tapping saves and previews.
+pub fn ring_screen(f: &Fonts, ring: &ring::Settings) -> Tree {
+    let mut b = B::new(f);
+    b.header("LED ring", "");
+    let rows: [(&str, Vec<&str>, usize); 4] = [
+        (
+            "All good",
+            ring::GOOD.iter().map(|p| p.label()).collect(),
+            ring::GOOD.iter().position(|p| *p == ring.good).unwrap_or(0),
+        ),
+        (
+            "Needs attention",
+            ring::ATTENTION.iter().map(|p| p.label()).collect(),
+            ring::ATTENTION
+                .iter()
+                .position(|p| *p == ring.attention)
+                .unwrap_or(0),
+        ),
+        (
+            "Something down",
+            ring::DOWN.iter().map(|p| p.label()).collect(),
+            ring::DOWN.iter().position(|p| *p == ring.down).unwrap_or(0),
+        ),
+        (
+            "Brightness",
+            ring::BRIGHTNESS.iter().map(|(n, _)| *n).collect(),
+            ring.brightness.min(2),
+        ),
+    ];
+    let label_w = 136.0;
+    let opt_w = (WIDTH - label_w - 3.0 * GAP) / 3.0;
+    let sel_style = Style::new(Face::SemiBold, size::BODY.0);
+    for (ri, (label, opts, on)) in rows.into_iter().enumerate() {
+        let y = TOP + ri as f32 * (44.0 + GAP);
+        let row =
+            b.t.add(None, label, Rect::new(M, y, WIDTH, 44.0), Paint::None);
+        b.text(
+            row,
+            "label",
+            Rect::new(M, y, label_w, 44.0),
+            label,
+            body(),
+            INK2,
+        );
+        for (oi, opt) in opts.into_iter().enumerate() {
+            let r = Rect::new(
+                M + label_w + GAP + oi as f32 * (opt_w + GAP),
+                y,
+                opt_w,
+                44.0,
+            );
+            let sel = oi == on;
+            let it = b.t.add(
+                Some(row),
+                opt,
+                r,
+                Paint::Panel {
+                    fill: if sel { theme::TRACK } else { theme::SURFACE },
+                    radius: theme::RADIUS_TILE,
+                    border: sel.then_some(INK2),
+                },
+            );
+            b.t.nav(it, Nav::RingSet(ri as u8, oi as u8));
+            b.t.pad(it, 8.0);
+            let st = if sel { sel_style } else { body() };
+            let w = b.f.width(&st, opt).min(r.w - 16.0);
+            b.text(
+                it,
+                "label",
+                Rect::new(r.x + (r.w - w) / 2.0, r.y + 8.0, w, 28.0),
+                opt,
+                st,
+                if sel { INK } else { INK2 },
+            );
+        }
+    }
+    let note = "Tap a pattern to see it on the ring for 6 s · saved at once";
+    let nw = b.f.width(&small(), note).min(WIDTH);
+    let n = b.t.add(
+        None,
+        "hint",
+        Rect::new(M, TOP + 4.0 * 52.0 + GAP, WIDTH, 20.0),
+        Paint::None,
+    );
+    b.text(
+        n,
+        "text",
+        Rect::new(M + (WIDTH - nw) / 2.0, TOP + 4.0 * 52.0 + GAP, nw, 20.0),
+        note,
+        small(),
+        INK3,
+    );
+    b.t
 }
 
 #[cfg(test)]
