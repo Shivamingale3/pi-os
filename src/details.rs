@@ -109,6 +109,9 @@ pub struct Fs {
     pub mount: String,
     pub used: u64,
     pub size: u64,
+    /// same formula as `df` and Home (space reserved for root doesn't count as free)
+    #[serde(default)]
+    pub percent: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -117,7 +120,9 @@ pub struct Drive {
     pub model: String,
     pub size: u64,
     pub kind: String,
-    pub celsius: Option<f64>,
+    /// bytes written since boot (its temperature lives on the Temperatures screen)
+    #[serde(default)]
+    pub written: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -643,6 +648,7 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
                 mount: mnt.clone(),
                 used: d.used_bytes,
                 size: d.total_bytes,
+                percent: d.used_percent,
             });
         }
     }
@@ -656,6 +662,7 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
         let a = diskstats(&read_file("/proc/diskstats")?, dev);
         std::thread::sleep(SAMPLE);
         let b = diskstats(&read_file("/proc/diskstats")?, dev);
+        let written = b.map_or(0, |b| b.1 * 512);
         if let (Some(a), Some(b)) = (a, b) {
             let s = SAMPLE.as_secs_f64();
             read_bps = b.0.saturating_sub(a.0) as f64 * 512.0 / s;
@@ -678,19 +685,11 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
         } else {
             "drive"
         };
-        let celsius = if kind == "NVMe" {
-            temps()
-                .ok()
-                .and_then(|t| t.sensors.into_iter().find(|s| s.name == "NVMe"))
-                .map(|s| s.celsius)
-        } else {
-            None
-        };
         drive = Some(Drive {
             model: if model.is_empty() { dev.clone() } else { model },
             size,
             kind: kind.into(),
-            celsius,
+            written,
         });
     }
     Ok(DiskDetails {
