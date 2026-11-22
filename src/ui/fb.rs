@@ -91,8 +91,8 @@ impl Framebuffer {
         // SAFETY: both ioctls only fill the buffers we pass, which are larger than the structs.
         let (rv, rf) = unsafe {
             (
-                libc::ioctl(file.as_raw_fd(), FBIOGET_VSCREENINFO, v.as_mut_ptr()),
-                libc::ioctl(file.as_raw_fd(), FBIOGET_FSCREENINFO, f.as_mut_ptr()),
+                libc::ioctl(file.as_raw_fd(), FBIOGET_VSCREENINFO as _, v.as_mut_ptr()),
+                libc::ioctl(file.as_raw_fd(), FBIOGET_FSCREENINFO as _, f.as_mut_ptr()),
             )
         };
         if rv != 0 || rf != 0 {

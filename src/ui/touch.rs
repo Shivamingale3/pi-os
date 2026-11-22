@@ -129,7 +129,7 @@ fn abs_range(file: &File, code: u16) -> Option<(i32, i32)> {
     // EVIOCGABS(code) = _IOR('E', 0x40 + code, struct input_absinfo) (24 bytes)
     let req = (2u64 << 30) | (24u64 << 16) | (('E' as u64) << 8) | (0x40 + code as u64);
     // SAFETY: the ioctl fills the 24-byte struct we pass.
-    let r = unsafe { libc::ioctl(file.as_raw_fd(), req as libc::c_ulong, b.as_mut_ptr()) };
+    let r = unsafe { libc::ioctl(file.as_raw_fd(), req as _, b.as_mut_ptr()) };
     (r == 0 && b[2] > b[1]).then_some((b[1], b[2]))
 }
 
