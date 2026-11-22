@@ -1,26 +1,28 @@
-//! `pios ui --fb …`: Home on the real panel.
+//! `pios ui --fb …`: the screens on the real panel.
 //!
 //! The loop sleeps in poll() on the touch device until something is due (a touch, the clock,
-//! the next fetch, the end of a press highlight), so it costs nothing while nothing happens.
-//! It redraws only when the picture changes, and sends only the changed rows (fb.rs).
-//! Backlight: off after `idle` without a touch; the first touch on a dark screen only wakes it.
+//! the next fetch for the open screen, the end of a press highlight), so it costs nothing while
+//! nothing happens. It redraws only when the layout changes, and sends only changed rows (fb.rs).
+//! A tap brightens its target for a moment, then opens where it points.
+//! Backlight: off after `idle` without a touch (and back to Home); the first touch on a dark
+//! screen only wakes it.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use super::app::App;
 use super::canvas::{Canvas, Fonts, rounded};
 use super::fb::Framebuffer;
-use super::home::{Data, Home};
-use super::layout::{self, Paint, Rect, Tree};
+use super::layout::{self, Nav, Paint, Tree};
 use super::theme;
 use super::touch::{Calibration, Event, Taps, Touch};
 use crate::error::Result;
 use crate::signals;
+use crate::types::now_ms;
 
-pub const FETCH_EVERY: Duration = Duration::from_secs(5);
 /// While the screen is dark, read the agent rarely (nothing is shown).
 pub const FETCH_EVERY_DARK: Duration = Duration::from_secs(60);
-pub const PRESS_SHOWN: Duration = Duration::from_millis(180);
+pub const PRESS_SHOWN: Duration = Duration::from_millis(150);
 
 /// The touch target under (x, y): the innermost one (added last).
 pub fn hit(tree: &Tree, x: f32, y: f32) -> Option<usize> {
@@ -30,7 +32,7 @@ pub fn hit(tree: &Tree, x: f32, y: f32) -> Option<usize> {
     })
 }
 
-/// Draws a screen; `pressed` gets a 2 px ring inside its edge (feedback for a tap).
+/// Draws a screen; `pressed` is brightened (feedback for a tap).
 pub fn frame<'f>(tree: &Tree, fonts: &'f Fonts, pressed: Option<usize>) -> Canvas<'f> {
     let mut c = Canvas::new(fonts);
     layout::render(tree, &mut c);
@@ -39,15 +41,7 @@ pub fn frame<'f>(tree: &Tree, fonts: &'f Fonts, pressed: Option<usize>) -> Canva
             Paint::Panel { radius, .. } => radius,
             _ => theme::RADIUS_TILE,
         };
-        let r = it.rect;
-        c.stroke(
-            &rounded(
-                Rect::new(r.x + 1.0, r.y + 1.0, r.w - 2.0, r.h - 2.0),
-                radius - 1.0,
-            ),
-            theme::INK2,
-            2.0,
-        );
+        c.fill_alpha(&rounded(it.rect, radius), 0xFFFFFF, 34);
     }
     c
 }
@@ -89,6 +83,12 @@ fn poll_touch(fd: Option<i32>, timeout: Duration) {
     }
 }
 
+/// The current screen's layout, for the clock right now.
+pub fn current_tree(app: &App, fonts: &Fonts) -> Tree {
+    let (time, date) = super::local_now();
+    app.tree(fonts, now_ms(), &time, &date, &super::local_at)
+}
+
 pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     signals::install();
     let mut fb = Framebuffer::open(&o.fb, theme::W as usize, theme::H as usize)?;
@@ -107,21 +107,22 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             .unwrap_or_default()
     );
 
-    let mut data = Data::default();
-    let mut fetched: Option<Instant> = None;
+    let mut app = App::live();
     let mut taps = Taps::default();
     let mut last_touch = Instant::now();
     let mut dark = false;
+    let mut dark_fetch: Option<Instant> = None;
     let mut swallow = false; // the touch that woke the screen does nothing else
-    let mut pressed: Option<(usize, Instant)> = None;
-    let mut shown: Option<(Home, Option<usize>)> = None;
+    let mut pressed: Option<(usize, Instant, Option<Nav>)> = None;
+    let mut shown: Option<(Tree, Option<usize>)> = None;
 
     while !signals::stopping() {
         let now = Instant::now();
-        let every = if dark { FETCH_EVERY_DARK } else { FETCH_EVERY };
-        if fetched.is_none_or(|t| now - t >= every) {
-            data = super::fetch(&o.socket);
-            fetched = Some(now);
+        if !dark {
+            app.update(&o.socket, now);
+        } else if dark_fetch.is_none_or(|t| now - t >= FETCH_EVERY_DARK) {
+            app.update(&o.socket, now);
+            dark_fetch = Some(now);
         }
 
         for ev in touch.as_mut().map(|t| t.read()).unwrap_or_default() {
@@ -132,6 +133,7 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
                     swallow = true;
                     light.set(true);
                     fb.invalidate();
+                    shown = None;
                 }
                 continue;
             }
@@ -142,11 +144,10 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
                 continue;
             }
             if let Some((x, y)) = taps.feed(ev, now) {
-                let (time, date) = super::local_now();
-                let tree = Home::build(&data, &time, &date).tree(fonts);
+                let tree = current_tree(&app, fonts);
                 if let Some(i) = hit(&tree, x, y) {
                     eprintln!("pios ui: tap {} at {x:.0},{y:.0}", tree.items[i].name);
-                    pressed = Some((i, now + PRESS_SHOWN));
+                    pressed = Some((i, now + PRESS_SHOWN, tree.items[i].nav));
                 }
             }
         }
@@ -154,35 +155,40 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
         if !dark && now - last_touch >= o.idle {
             dark = true;
             light.set(false);
-        }
-
-        if pressed.is_some_and(|(_, until)| now >= until) {
+            app.go(Nav::Home);
             pressed = None;
         }
-        if !dark {
-            let (time, date) = super::local_now();
-            let home = Home::build(&data, &time, &date);
-            let p = pressed.map(|(i, _)| i);
-            if shown.as_ref() != Some(&(home.clone(), p)) {
-                let tree = home.tree(fonts);
-                let c = frame(&tree, fonts, p);
-                fb.present(c.pm.data())?;
-                shown = Some((home, p));
+
+        if let Some((_, until, nav)) = pressed
+            && now >= until
+        {
+            pressed = None;
+            if let Some(nav) = nav {
+                app.go(nav);
+                app.update(&o.socket, Instant::now());
             }
         }
 
-        // sleep until something is due: a touch, the press highlight ending, the next fetch, or
-        // (lit) the next second for the clock
+        if !dark {
+            let tree = current_tree(&app, fonts);
+            let p = pressed.map(|(i, _, _)| i);
+            if shown.as_ref().is_none_or(|(t, sp)| *t != tree || *sp != p) {
+                let c = frame(&tree, fonts, p);
+                fb.present(c.pm.data())?;
+                shown = Some((tree, p));
+            }
+        }
+
+        // sleep until something is due: a touch, the highlight ending, the open screen's next
+        // fetch, or (lit) the next second for the clock
+        let now = Instant::now();
         let mut wait = if dark {
             FETCH_EVERY_DARK
         } else {
-            Duration::from_secs(1)
+            Duration::from_secs(1).min(app.next_due(now))
         };
-        if let Some((_, until)) = pressed {
-            wait = wait.min(until.saturating_duration_since(Instant::now()));
-        }
-        if let Some(t) = fetched {
-            wait = wait.min((t + every).saturating_duration_since(Instant::now()));
+        if let Some((_, until, _)) = pressed {
+            wait = wait.min(until.saturating_duration_since(now));
         }
         poll_touch(
             touch.as_ref().map(|t| t.raw_fd()),
@@ -204,6 +210,7 @@ pub fn centre(tree: &Tree, name: &str) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::home::Home;
 
     #[test]
     fn taps_hit_the_right_target() {

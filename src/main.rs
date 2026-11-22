@@ -19,6 +19,7 @@
 
 mod api;
 mod collect;
+mod details;
 mod error;
 mod helper;
 mod http;

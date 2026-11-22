@@ -9,7 +9,7 @@
 //! └ 12 ──────────────────────────────────────────────────────────────────┘
 
 use super::canvas::{Face, Fonts, Style};
-use super::layout::{Marker, Paint, Rect, Tree};
+use super::layout::{Marker, Nav, Paint, Rect, Tree};
 use super::theme::{
     self, GAP, INK, INK2, INK3, MIN_GAP, MUTED, PAD_CARD, PAD_TILE, Status, size, status_colors,
 };
@@ -302,7 +302,7 @@ impl Home {
                 border: None,
             },
         );
-        t.touch(b);
+        t.nav(b, Nav::History);
         t.pad(b, PAD_TILE);
         t.add(
             Some(b),
@@ -547,7 +547,13 @@ impl Home {
                     border: None,
                 },
             );
-            t.touch(ti);
+            match tile.label {
+                "CPU" => t.nav(ti, Nav::Cpu),
+                "TEMP" => t.nav(ti, Nav::Temps),
+                "MEMORY" => t.nav(ti, Nav::Memory),
+                "DISK" => t.nav(ti, Nav::Disk),
+                _ => t.touch(ti),
+            };
             t.pad(ti, PAD_TILE);
             let inn = r.inset(PAD_TILE);
 

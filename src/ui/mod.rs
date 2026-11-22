@@ -9,11 +9,14 @@
 //! Panel settings (environment): PIOS_TOUCH_MATRIX (libinput calibration, 6 numbers),
 //! PIOS_BACKLIGHT (sysfs brightness file), PIOS_IDLE_MIN (screen off after, default 30).
 
+pub mod app;
 pub mod canvas;
 pub mod fb;
 pub mod home;
 pub mod layout;
 pub mod panel;
+pub mod samples;
+pub mod screens;
 pub mod theme;
 pub mod touch;
 
@@ -24,29 +27,47 @@ use serde::Deserialize;
 
 use crate::error::{Result, err};
 use crate::types::Snapshot;
-use canvas::{Canvas, Fonts};
-use home::{Data, Home, OpenIncident};
+use canvas::Fonts;
+use home::{Data, OpenIncident};
 
 const API_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// (time "12:04", date "Wed 18 Nov") in local time.
 pub fn local_now() -> (String, String) {
+    // SAFETY: time() has no preconditions.
+    local_at(unsafe { libc::time(std::ptr::null_mut()) } as i64 * 1000)
+}
+
+/// (time "12:04", date "Wed 18 Nov") of a timestamp (ms), in local time.
+pub fn local_at(ms: i64) -> (String, String) {
+    // SAFETY: localtime_r only writes into the struct we pass.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t = (ms / 1000) as libc::time_t;
+    unsafe {
+        libc::localtime_r(&t, &mut tm);
+    }
+    format_tm(tm.tm_hour, tm.tm_min, tm.tm_wday, tm.tm_mday, tm.tm_mon)
+}
+
+/// The same in UTC (tests: golden images must not depend on the machine's time zone).
+pub fn utc_at(ms: i64) -> (String, String) {
+    // SAFETY: gmtime_r only writes into the struct we pass.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let t = (ms / 1000) as libc::time_t;
+    unsafe {
+        libc::gmtime_r(&t, &mut tm);
+    }
+    format_tm(tm.tm_hour, tm.tm_min, tm.tm_wday, tm.tm_mday, tm.tm_mon)
+}
+
+fn format_tm(h: i32, m: i32, wday: i32, mday: i32, mon: i32) -> (String, String) {
     const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
-    // SAFETY: time() and localtime_r() only write into the values we pass.
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe {
-        let now = libc::time(std::ptr::null_mut());
-        libc::localtime_r(&now, &mut tm);
-    }
-    let day = DAYS.get(tm.tm_wday as usize).unwrap_or(&"");
-    let month = MONTHS.get(tm.tm_mon as usize).unwrap_or(&"");
-    (
-        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min),
-        format!("{day} {} {month}", tm.tm_mday),
-    )
+    let day = DAYS.get(wday as usize).unwrap_or(&"");
+    let month = MONTHS.get(mon as usize).unwrap_or(&"");
+    (format!("{h:02}:{m:02}"), format!("{day} {mday} {month}"))
 }
 
 #[derive(Deserialize)]
@@ -67,12 +88,24 @@ struct TrendResponse {
     points: Vec<(i64, f64)>,
 }
 
-fn get_json<T: for<'de> Deserialize<'de>>(socket: &Path, path: &str) -> Result<T> {
+pub fn get_json<T: for<'de> Deserialize<'de>>(socket: &Path, path: &str) -> Result<T> {
     let (status, body) = crate::http::get(socket, path, API_TIMEOUT)?;
     if status != 200 {
         return Err(err(format!("{path}: HTTP {status}")));
     }
     Ok(serde_json::from_str(&body)?)
+}
+
+#[derive(Deserialize)]
+pub struct IncidentsOut {
+    pub incidents: Vec<screens::Incident>,
+}
+
+/// Every point of the last 24 h for a trend metric, oldest first.
+pub fn trend_24h(socket: &Path, metric: &str) -> Vec<f32> {
+    get_json::<TrendResponse>(socket, &format!("/trend?metric={metric}"))
+        .map(|t| t.points.iter().map(|p| p.1 as f32).collect())
+        .unwrap_or_default()
 }
 
 fn last_10(socket: &Path, metric: &str) -> Vec<f32> {
@@ -114,9 +147,10 @@ pub fn fetch(socket: &Path) -> Data {
     }
 }
 
-pub fn draw<'f>(home: &Home, fonts: &'f Fonts) -> Canvas<'f> {
+#[cfg(test)]
+pub fn draw<'f>(home: &home::Home, fonts: &'f Fonts) -> canvas::Canvas<'f> {
     let tree = home.tree(fonts);
-    let mut c = Canvas::new(fonts);
+    let mut c = canvas::Canvas::new(fonts);
     layout::render(&tree, &mut c);
     c
 }
@@ -125,7 +159,7 @@ pub fn draw<'f>(home: &Home, fonts: &'f Fonts) -> Canvas<'f> {
 
 pub const SAMPLES: [&str; 5] = ["good", "attention", "down", "waiting", "worst"];
 
-fn sample_snapshot(
+pub fn sample_snapshot(
     hostname: &str,
     cpu: f64,
     temp: Option<f64>,
@@ -164,6 +198,7 @@ fn sample_snapshot(
             total,
             containers: (0..total)
                 .map(|i| Container {
+                    id: format!("{i:064x}"),
                     name: format!("app{i}"),
                     state: if i < running { "running" } else { "exited" }.into(),
                 })
@@ -256,6 +291,7 @@ struct Args {
     png: Option<PathBuf>,
     preview: bool,
     sample: Option<String>,
+    screen: app::Screen,
     check: bool,
     scale: usize,
 }
@@ -267,56 +303,74 @@ fn parse_args(args: &[String]) -> Result<Args> {
         png: None,
         preview: false,
         sample: None,
+        screen: app::Screen::Home,
         check: false,
         scale: 2,
     };
     let mut it = args.iter();
-    while let Some(arg) = it.next() {
+    let mut next = |what: &str| {
+        it.next()
+            .cloned()
+            .ok_or_else(|| err(format!("{what} needs a value")))
+    };
+    while let Ok(arg) = next("") {
         match arg.as_str() {
-            "--png" => a.png = Some(it.next().ok_or_else(|| err("--png needs a file"))?.into()),
-            "--fb" => a.fb = Some(it.next().ok_or_else(|| err("--fb needs a device"))?.into()),
-            "--touch" => {
-                a.touch = Some(
-                    it.next()
-                        .ok_or_else(|| err("--touch needs a device"))?
-                        .into(),
-                )
-            }
+            "--png" => a.png = Some(next("--png")?.into()),
+            "--fb" => a.fb = Some(next("--fb")?.into()),
+            "--touch" => a.touch = Some(next("--touch")?.into()),
             "--preview" => a.preview = true,
-            "--sample" => {
-                a.sample = Some(
-                    it.next()
-                        .ok_or_else(|| err("--sample needs a name"))?
-                        .clone(),
-                )
+            "--sample" => a.sample = Some(next("--sample")?),
+            "--screen" => {
+                let s = next("--screen")?;
+                a.screen = app::Screen::parse(&s).ok_or_else(|| {
+                    err(format!(
+                        "no screen {s:?}; try one of {}",
+                        app::SCREENS.join(", ")
+                    ))
+                })?;
             }
             "--check" => a.check = true,
             "--scale" => {
-                a.scale = it
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| err("--scale needs 1, 2 or 4"))?
+                a.scale = next("--scale")?
+                    .parse()
+                    .map_err(|_| err("--scale needs 1, 2 or 4"))?
             }
             other => return Err(err(format!("unknown option {other}"))),
         }
     }
     if a.png.is_none() && !a.preview && !a.check && a.fb.is_none() {
         return Err(err(
-            "usage: pios ui --fb DEV [--touch DEV] | [--sample NAME] [--png FILE | --preview [--scale N] | --check]",
+            "usage: pios ui --fb DEV [--touch DEV] | [--sample NAME] [--screen NAME] [--png FILE | --preview [--scale N] | --check]",
         ));
     }
     Ok(a)
 }
 
-fn load_data(sample_name: Option<&str>, socket: &Path) -> Result<Data> {
+/// The app for a sample, or a live one (fetched once) on the chosen screen.
+fn make_app(sample_name: Option<&str>, screen: app::Screen, socket: &Path) -> Result<app::App> {
     match sample_name {
-        Some(n) => sample(n).ok_or_else(|| {
+        Some(n) => samples::sample_app(n, screen).ok_or_else(|| {
             err(format!(
                 "no sample {n:?}; try one of {}",
                 SAMPLES.join(", ")
             ))
         }),
-        None => Ok(fetch(socket)),
+        None => {
+            let mut a = app::App::live();
+            a.screen = Some(screen);
+            a.update(socket, std::time::Instant::now());
+            Ok(a)
+        }
+    }
+}
+
+/// Samples use a fixed clock and UTC, so pictures don't change with time or time zone.
+fn tree_for(a: &app::App, fonts: &Fonts) -> layout::Tree {
+    if a.live {
+        panel::current_tree(a, fonts)
+    } else {
+        let (time, date) = utc_at(samples::NOW_MS);
+        a.tree(fonts, samples::NOW_MS, &time, &date, &utc_at)
     }
 }
 
@@ -331,20 +385,26 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
         };
         let mut bad = 0;
         for n in &names {
-            let d = load_data(Some(n), socket)?;
-            let v = layout::check(&Home::build(&d, "12:04", "Wed 18 Nov").tree(&fonts));
-            println!(
-                "{n}: {}",
-                if v.is_empty() {
-                    "clean".to_string()
-                } else {
-                    format!("{} problem(s)", v.len())
+            for s in app::SCREENS {
+                let ap = make_app(
+                    Some(n),
+                    app::Screen::parse(s).expect("known screen"),
+                    socket,
+                )?;
+                let v = layout::check(&tree_for(&ap, &fonts));
+                println!(
+                    "{n} · {s}: {}",
+                    if v.is_empty() {
+                        "clean".to_string()
+                    } else {
+                        format!("{} problem(s)", v.len())
+                    }
+                );
+                for line in &v {
+                    println!("  {line}");
                 }
-            );
-            for line in &v {
-                println!("  {line}");
+                bad += v.len();
             }
-            bad += v.len();
         }
         if bad > 0 {
             return Err(err(format!("{bad} spacing problem(s)")));
@@ -352,9 +412,8 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
     }
 
     if let Some(path) = &a.png {
-        let d = load_data(a.sample.as_deref(), socket)?;
-        let (time, date) = local_now();
-        let c = draw(&Home::build(&d, &time, &date), &fonts);
+        let ap = make_app(a.sample.as_deref(), a.screen, socket)?;
+        let c = panel::frame(&tree_for(&ap, &fonts), &fonts, None);
         c.pm.save_png(path)
             .map_err(|e| err(format!("{}: {e}", path.display())))?;
         println!("wrote {}", path.display());
@@ -410,39 +469,44 @@ fn preview(a: &Args, socket: &Path, fonts: &Fonts) -> Result<()> {
         },
     )
     .map_err(|e| err(format!("preview window: {e}")))?;
-    win.set_target_fps(10);
-    let mut data = load_data(a.sample.as_deref(), socket)?;
-    let mut fetched = Instant::now();
-    let mut shown: Option<(Home, Option<usize>)> = None;
+    win.set_target_fps(20);
+    let mut ap = make_app(a.sample.as_deref(), a.screen, socket)?;
+    let mut shown: Option<(layout::Tree, Option<usize>)> = None;
     let mut buf = vec![0u32; (theme::W * theme::H) as usize];
     let mut was_down = false;
-    let mut pressed: Option<(usize, Instant)> = None;
+    let mut pressed: Option<(usize, Instant, Option<layout::Nav>)> = None;
     while win.is_open() && !win.is_key_down(Key::Escape) {
-        if a.sample.is_none() && fetched.elapsed() >= Duration::from_secs(5) {
-            data = fetch(socket);
-            fetched = Instant::now();
-        }
-        let (time, date) = local_now();
-        let home = Home::build(&data, &time, &date);
+        ap.update(socket, Instant::now());
+        let tree = tree_for(&ap, fonts);
         let down = win.get_mouse_down(minifb::MouseButton::Left);
         if down
             && !was_down
             && let Some((x, y)) = win.get_mouse_pos(minifb::MouseMode::Discard)
+            && let Some(i) = panel::hit(&tree, x, y)
         {
-            let tree = home.tree(fonts);
-            if let Some(i) = panel::hit(&tree, x, y) {
-                println!("tap {} at {x:.0},{y:.0}", tree.items[i].name);
-                pressed = Some((i, Instant::now() + panel::PRESS_SHOWN));
-            }
+            println!("tap {} at {x:.0},{y:.0}", tree.items[i].name);
+            pressed = Some((i, Instant::now() + panel::PRESS_SHOWN, tree.items[i].nav));
         }
         was_down = down;
-        if pressed.is_some_and(|(_, until)| Instant::now() >= until) {
+        if let Some((_, until, nav)) = pressed
+            && Instant::now() >= until
+        {
             pressed = None;
+            if let Some(nav) = nav {
+                ap.go(nav);
+                if !ap.live {
+                    // samples have data for every screen; keep the sample's incident
+                    if let (app::Screen::Incident(_), Some(i)) = (ap.screen(), &ap.incident) {
+                        ap.screen = Some(app::Screen::Incident(i.incident.id));
+                    }
+                }
+                continue;
+            }
         }
-        let p = pressed.map(|(i, _)| i);
-        if shown.as_ref() != Some(&(home.clone(), p)) {
-            buf = panel::frame(&home.tree(fonts), fonts, p).xrgb();
-            shown = Some((home, p));
+        let p = pressed.map(|(i, _, _)| i);
+        if shown.as_ref().is_none_or(|(t, sp)| *t != tree || *sp != p) {
+            buf = panel::frame(&tree, fonts, p).xrgb();
+            shown = Some((tree, p));
         }
         win.update_with_buffer(&buf, theme::W as usize, theme::H as usize)
             .map_err(|e| err(format!("preview window: {e}")))?;
@@ -460,6 +524,7 @@ fn preview(_: &Args, _: &Path, _: &Fonts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::home::Home;
 
     fn golden_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden")

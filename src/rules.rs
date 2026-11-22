@@ -464,6 +464,7 @@ pub mod tests {
         let containers: Vec<Container> = containers
             .iter()
             .map(|(n, st)| Container {
+                id: String::new(),
                 name: n.to_string(),
                 state: st.to_string(),
             })

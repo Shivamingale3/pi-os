@@ -10,6 +10,8 @@ use crate::types::{Container, Docker};
 
 #[derive(Deserialize)]
 struct ApiContainer {
+    #[serde(rename = "Id", default)]
+    id: String,
     #[serde(rename = "Names", default)]
     names: Vec<String>,
     #[serde(rename = "State")]
@@ -31,6 +33,7 @@ fn parse(status: u16, body: &str) -> Result<Docker> {
     let mut containers: Vec<Container> = list
         .into_iter()
         .map(|c| Container {
+            id: c.id,
             name: c
                 .names
                 .first()

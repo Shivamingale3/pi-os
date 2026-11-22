@@ -1,5 +1,5 @@
 //! `pios helper`: the only PiOS process that touches Docker (it runs as root; the agent doesn't).
-//! It forwards exactly one read-only request and answers 403 to anything else, so access to its
+//! It forwards exactly two read-only requests and answers 403 to anything else, so access to its
 //! socket is not access to Docker.
 //!
 //! systemd starts it through `pios-helper.socket` and hands over the listening socket as fd 3
@@ -13,8 +13,10 @@ use std::time::Duration;
 use crate::error::{Result, err};
 use crate::http;
 
-/// The whole allowlist.
+/// The whole allowlist: the container list (every 5 s) and disk usage (Disk screen, cached 10 min).
 pub const ALLOWED: &str = "/containers/json?all=true";
+pub const DOCKER_DF: &str = "/system/df";
+const ALLOWLIST: [&str; 2] = [ALLOWED, DOCKER_DF];
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What to answer for one request line: (status, JSON body). Pure, so it's tested directly.
@@ -22,7 +24,7 @@ pub fn decide(method: &str, target: &str) -> Option<(u16, String)> {
     if method != "GET" {
         return Some((405, r#"{"error":"only GET"}"#.into()));
     }
-    if target != ALLOWED {
+    if !ALLOWLIST.contains(&target) {
         return Some((403, r#"{"error":"not allowed"}"#.into()));
     }
     None // allowed: forward to Docker
@@ -41,7 +43,16 @@ fn handle(stream: &mut UnixStream, docker: &Path) -> std::io::Result<()> {
     if let Some((status, body)) = decide(&method, &target) {
         return http::respond(stream, status, &body);
     }
-    match http::get(docker, ALLOWED, DOCKER_TIMEOUT) {
+    // forward the matched constant, never the client's string
+    let Some(path) = ALLOWLIST.iter().find(|p| **p == target) else {
+        return http::respond(stream, 403, r#"{"error":"not allowed"}"#);
+    };
+    let timeout = if *path == DOCKER_DF {
+        Duration::from_secs(10)
+    } else {
+        DOCKER_TIMEOUT
+    };
+    match http::get(docker, path, timeout) {
         Ok((status, body)) => http::respond(stream, status, &body),
         Err(e) => http::respond(
             stream,
@@ -92,11 +103,14 @@ mod tests {
     #[test]
     fn only_the_container_list_passes() {
         assert_eq!(decide("GET", "/containers/json?all=true"), None);
+        assert_eq!(decide("GET", "/system/df"), None);
         for bad in [
             "/containers/json",
             "/containers/redis/stop",
             "/containers/json?all=true&x=1",
             "/images/json",
+            "/system/df?verbose=1",
+            "/system/prune",
             "/v1.45/containers/json?all=true",
             "/containers/json?all=true/../create",
             "",
