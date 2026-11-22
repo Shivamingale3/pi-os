@@ -216,6 +216,7 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
         }
     }
     remove(crate::update::PREV);
+    remove(&format!("{}.failed", crate::update::BIN));
     remove(crate::update::BIN);
     println!(
         "PiOS removed{}",
