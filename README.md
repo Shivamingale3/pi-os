@@ -88,10 +88,10 @@ frequency, load average, 24 h graph, busiest processes), **Temperatures** (every
 limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, biggest users) and **Disk**
 (filesystems, the drive, live read/write, Docker disk usage). **History** lists the last 7 days of
 incidents; a row opens its start, peak and end snapshots. The big status card opens **Services**,
-on the first tab with a problem: **Apps · Host · Web**. Apps has one tile per container, problems first (red: not running; amber: unhealthy, restarting or paused),
-9 per page; a tile opens the container (state, uptime or exit code, CPU and memory with its limit,
+on the first tab with a problem: **Apps · Host · Web**. Apps lists one row per container (full name, health or uptime, memory), problems first (red: not running; amber: unhealthy, restarting or paused),
+4 per page, or 3 with the ‹ › pager; a row opens the container (state, uptime or exit code, CPU and memory with its limit,
 image, Compose project, ports) and its **Restart** button (**Start** when stopped): hold it 2 s;
-lifting or sliding away cancels, and a tap does nothing. **Host** has one tile per host service
+lifting or sliding away cancels, and a tap does nothing. **Host** lists one row per host service
 (its detail shows the unit, main process and tasks; no Restart). **Web** lists each hostname with
 its response time and HTTP code, problems first, 4 per page. Each screen has a 44 px back button.
 Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk,services}`).

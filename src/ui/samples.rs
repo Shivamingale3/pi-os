@@ -871,9 +871,7 @@ mod tests {
                     let mut d = all.clone();
                     d.services.truncate(count);
                     d.reachable = reachable;
-                    let pages = count
-                        .div_ceil(crate::ui::screens::tiles_per_page(count))
-                        .max(1);
+                    let pages = count.div_ceil(crate::ui::screens::list_rows(count)).max(1);
                     a.services = Some(d);
                     for p in 0..=pages {
                         a.page = p;
