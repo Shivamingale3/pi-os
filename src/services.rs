@@ -1,9 +1,13 @@
 //! The Services screen's data, collected only on request (`GET /details/services`, while the
 //! screen is open): Docker's container list (the same allow-listed GET the agent already makes)
-//! plus each container's CPU, memory, limit and uptime from its cgroup. Read-only.
+//! plus each container's CPU, memory, limit and uptime from its cgroup.
+//!
+//! The one action: `POST /containers/ID/restart` (the screen's 2 s hold). The agent answers at
+//! once and asks the helper on a background thread; the list then reports how it went.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -44,6 +48,113 @@ pub struct Service {
     pub mem: Option<u64>,
     pub mem_limit: Option<u64>,
     pub up_sec: Option<u64>,
+    /// a restart asked for from the screen in the last minute
+    #[serde(default)]
+    pub restart: Option<Restart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Restart {
+    pub ago_sec: u64,
+    pub done: bool,
+    /// why it failed (Docker's message); None = it worked (or is still running)
+    pub error: Option<String>,
+}
+
+/// One restart per container per minute; the screen shows the countdown.
+pub const RESTART_EVERY: Duration = Duration::from_secs(60);
+
+struct Asked {
+    at: Instant,
+    done: bool,
+    error: Option<String>,
+}
+
+static ASKED: Mutex<Option<HashMap<String, Asked>>> = Mutex::new(None);
+
+fn recent(id: &str) -> Option<Restart> {
+    let g = ASKED.lock().ok()?;
+    let a = g.as_ref()?.get(id)?;
+    let ago = a.at.elapsed();
+    // keep showing a failure until the next try; a success only for the minute
+    (ago < RESTART_EVERY || a.error.is_some() || !a.done).then(|| Restart {
+        ago_sec: ago.as_secs(),
+        done: a.done,
+        error: a.error.clone(),
+    })
+}
+
+/// Docker's error body {"message": "..."} → the message.
+fn docker_message(status: u16, body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .or_else(|| v.get("error"))?
+                .as_str()
+                .map(String::from)
+        })
+        .unwrap_or_else(|| format!("HTTP {status}"))
+}
+
+/// The agent's `POST /containers/ID/restart`: checks, records, and returns at once
+/// (202); the helper does the restart on a background thread. `known`: the ID → name of every
+/// container in the latest snapshot (only those can be restarted).
+pub fn ask_restart(helper: &Path, id: &str, known: &HashMap<String, String>) -> (u16, String) {
+    if !crate::helper::is_id(id) {
+        return (400, "not a container ID".into());
+    }
+    let Some(name) = known.get(id).cloned() else {
+        return (404, "no such container".into());
+    };
+    {
+        let Ok(mut g) = ASKED.lock() else {
+            return (500, "busy".into());
+        };
+        let map = g.get_or_insert_with(HashMap::new);
+        if let Some(a) = map.get(id) {
+            if !a.done {
+                return (409, "a restart is already running".into());
+            }
+            if a.at.elapsed() < RESTART_EVERY && a.error.is_none() {
+                return (429, "restarted less than a minute ago".into());
+            }
+        }
+        map.insert(
+            id.to_string(),
+            Asked {
+                at: Instant::now(),
+                done: false,
+                error: None,
+            },
+        );
+    }
+    eprintln!("pios: restart {name} ({}) asked from the screen", &id[..12]);
+    let (helper, id) = (helper.to_path_buf(), id.to_string());
+    std::thread::spawn(move || {
+        let r = crate::http::post(
+            &helper,
+            &crate::helper::restart_path(&id),
+            Duration::from_secs(45),
+        );
+        let error = match r {
+            Ok((204 | 200, _)) => None,
+            Ok((status, body)) => Some(docker_message(status, &body)),
+            Err(e) => Some(e.to_string()),
+        };
+        match &error {
+            None => eprintln!("pios: restart {name}: done"),
+            Some(e) => eprintln!("pios: restart {name}: failed: {e}"),
+        }
+        if let Ok(mut g) = ASKED.lock()
+            && let Some(a) = g.get_or_insert_with(HashMap::new).get_mut(&id)
+        {
+            a.done = true;
+            a.error = error;
+        }
+    });
+    (202, "restarting".into())
 }
 
 #[derive(Deserialize)]
@@ -269,6 +380,9 @@ pub fn collect(socket: &Path) -> Result<Services> {
         s.mem_limit = read_u64(&dir.join("memory.max")); // "max" (no limit) → None
         s.up_sec = uptime_of(dir);
     }
+    for s in list.iter_mut() {
+        s.restart = recent(&s.id);
+    }
     Ok(Services {
         reachable: true,
         services: list,
@@ -342,6 +456,31 @@ mod tests {
             (Some("apps"), Some("web"))
         );
         assert!(parse_list("not json").is_err());
+    }
+
+    #[test]
+    fn restart_checks_and_limits() {
+        let id = "c".repeat(64);
+        let known: HashMap<String, String> = [(id.clone(), "web".to_string())].into();
+        let helper = Path::new("/nonexistent/helper.sock");
+        assert_eq!(ask_restart(helper, "abc", &known).0, 400);
+        assert_eq!(ask_restart(helper, &"d".repeat(64), &known).0, 404);
+        assert_eq!(ask_restart(helper, &id, &known).0, 202);
+        // the helper isn't there: it fails quickly, and a failure may be retried at once
+        for _ in 0..100 {
+            if recent(&id).is_some_and(|r| r.done) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let r = recent(&id).unwrap();
+        assert!(r.done && r.error.is_some(), "{r:?}");
+        assert_eq!(ask_restart(helper, &id, &known).0, 202);
+        assert_eq!(
+            docker_message(500, r#"{"message":"no such container"}"#),
+            "no such container"
+        );
+        assert_eq!(docker_message(500, "<html>"), "HTTP 500");
     }
 
     #[test]

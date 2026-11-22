@@ -66,6 +66,8 @@ pub enum Nav {
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),
+    /// restart that container (a hold target: fires after a 2 s hold, never on a tap)
+    Restart(u64),
     Back,
 }
 
@@ -126,6 +128,14 @@ pub enum Paint {
     },
     /// "‹" (or "›" when the flag is true) for back and paging buttons
     Chevron(Rgb, bool),
+    /// a circular arrow (Restart), drawn to fit the box
+    RestartIcon(Rgb),
+    /// a hold's progress: the left `frac` of the box, tinted, clipped to its rounded corners
+    Progress {
+        frac: f32,
+        color: Rgb,
+        radius: f32,
+    },
     /// area chart: filled under the line, optional dashed guide at a value
     Area {
         values: Vec<f32>,
@@ -148,6 +158,8 @@ pub struct Item {
     pub paint: Paint,
     /// where a tap goes (touch targets only)
     pub nav: Option<Nav>,
+    /// fires only after a 2 s hold (panel.rs), not on a tap
+    pub hold: bool,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -172,8 +184,15 @@ impl Tree {
             content: None,
             paint,
             nav: None,
+            hold: false,
         });
         self.items.len() - 1
+    }
+    /// Makes `i` a hold target: `nav` fires after a 2 s hold.
+    pub fn hold(&mut self, i: usize, nav: Nav) -> usize {
+        self.nav(i, nav);
+        self.items[i].hold = true;
+        i
     }
     /// Makes `i` a touch target that goes to `nav`.
     pub fn nav(&mut self, i: usize, nav: Nav) -> usize {
@@ -394,6 +413,43 @@ pub fn render(t: &Tree, c: &mut Canvas) {
                 color,
                 guide,
             } => area(c, r, values, *min_span, *color, *guide),
+            Paint::RestartIcon(col) => {
+                let (cx, cy, rad) = (r.x + r.w / 2.0, r.cy(), r.w.min(r.h) / 2.0 - 2.0);
+                // an open circle, gap at the top, turning clockwise; arrow at the end
+                let pts: Vec<(f32, f32)> = (0..=28)
+                    .map(|i| {
+                        let a = (-60.0 + i as f32 * 10.0_f32).to_radians();
+                        (cx + rad * a.cos(), cy + rad * a.sin())
+                    })
+                    .collect();
+                if let Some(p) = polyline(&pts) {
+                    c.stroke(&p, *col, 2.2);
+                }
+                // arrowhead at the end, pointing the way the arc turns (clockwise)
+                let end = 220.0_f32.to_radians();
+                let (ex, ey) = (cx + rad * end.cos(), cy + rad * end.sin());
+                let (tx, ty) = (-end.sin(), end.cos());
+                let (nx, ny) = (-ty, tx);
+                let tip = (ex + tx * 2.0, ey + ty * 2.0);
+                let back = (tip.0 - tx * 6.0, tip.1 - ty * 6.0);
+                if let Some(p) = polyline(&[
+                    (back.0 + nx * 4.5, back.1 + ny * 4.5),
+                    tip,
+                    (back.0 - nx * 4.5, back.1 - ny * 4.5),
+                ]) {
+                    c.stroke(&p, *col, 2.2);
+                }
+            }
+            Paint::Progress {
+                frac,
+                color,
+                radius,
+            } => {
+                let w = (r.w * frac.clamp(0.0, 1.0)).round();
+                if w > 0.0 {
+                    c.fill_alpha_clipped(Rect::new(r.x, r.y, w, r.h), r, *radius, *color, 72);
+                }
+            }
         }
     }
 }

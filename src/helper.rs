@@ -1,6 +1,6 @@
 //! `pios helper`: the only PiOS process that touches Docker (it runs as root; the agent doesn't).
-//! It forwards exactly two read-only requests and answers 403 to anything else, so access to its
-//! socket is not access to Docker.
+//! It forwards exactly two read-only requests and one action, restarting one container by its
+//! full ID, and answers 403 to anything else, so access to its socket is not access to Docker.
 //!
 //! systemd starts it through `pios-helper.socket` and hands over the listening socket as fd 3
 //! (socket activation). Without systemd, set PIOS_HELPER_SOCKET to listen on a path (tests).
@@ -18,16 +18,70 @@ pub const ALLOWED: &str = "/containers/json?all=true";
 pub const DOCKER_DF: &str = "/system/df";
 const ALLOWLIST: [&str; 2] = [ALLOWED, DOCKER_DF];
 const DOCKER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Docker gives the container 10 s to stop before killing it, then starts it again.
+const RESTART_TIMEOUT: Duration = Duration::from_secs(40);
+/// At most this many restarts at once (each runs on its own thread; the unit allows 4 tasks).
+const MAX_RESTARTS: usize = 2;
+static RESTARTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A full container ID: exactly 64 lowercase hex digits.
+pub fn is_id(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// The one action's path. The helper rebuilds it from the ID, never forwards the client's text.
+pub fn restart_path(id: &str) -> String {
+    format!("/containers/{id}/restart?t=10")
+}
+
+/// "/containers/ID/restart?t=10" → ID
+fn restart_id(target: &str) -> Option<&str> {
+    let id = target
+        .strip_prefix("/containers/")?
+        .strip_suffix("/restart?t=10")?;
+    is_id(id).then_some(id)
+}
 
 /// What to answer for one request line: (status, JSON body). Pure, so it's tested directly.
 pub fn decide(method: &str, target: &str) -> Option<(u16, String)> {
-    if method != "GET" {
-        return Some((405, r#"{"error":"only GET"}"#.into()));
-    }
-    if !ALLOWLIST.contains(&target) {
+    let ok = match method {
+        "GET" => ALLOWLIST.contains(&target),
+        "POST" => restart_id(target).is_some(),
+        _ => return Some((405, r#"{"error":"only GET, or POST to restart"}"#.into())),
+    };
+    if !ok {
         return Some((403, r#"{"error":"not allowed"}"#.into()));
     }
     None // allowed: forward to Docker
+}
+
+fn restart(mut stream: UnixStream, docker: PathBuf, id: String) {
+    let r = http::post(&docker, &restart_path(&id), RESTART_TIMEOUT);
+    let short = &id[..12];
+    let sent = match r {
+        Ok((status, body)) => {
+            eprintln!("pios helper: restart {short}: HTTP {status}");
+            http::respond(
+                &mut stream,
+                status,
+                if body.is_empty() { "{}" } else { &body },
+            )
+        }
+        Err(e) => {
+            eprintln!("pios helper: restart {short}: {e}");
+            http::respond(
+                &mut stream,
+                502,
+                &serde_json::json!({ "error": e.to_string() }).to_string(),
+            )
+        }
+    };
+    if let Err(e) = sent
+        && !http::is_client_gone(&e)
+    {
+        eprintln!("pios helper: {e}");
+    }
+    RESTARTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn handle(stream: &mut UnixStream, docker: &Path) -> std::io::Result<()> {
@@ -42,6 +96,16 @@ fn handle(stream: &mut UnixStream, docker: &Path) -> std::io::Result<()> {
     };
     if let Some((status, body)) = decide(&method, &target) {
         return http::respond(stream, status, &body);
+    }
+    if let Some(id) = restart_id(&target) {
+        // on its own thread, so the 5 s container list keeps answering meanwhile
+        if RESTARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_RESTARTS {
+            RESTARTS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return http::respond(stream, 429, r#"{"error":"another restart is running"}"#);
+        }
+        let (s, d, id) = (stream.try_clone()?, docker.to_path_buf(), id.to_string());
+        std::thread::spawn(move || restart(s, d, id));
+        return Ok(());
     }
     // forward the matched constant, never the client's string
     let Some(path) = ALLOWLIST.iter().find(|p| **p == target) else {
@@ -117,7 +181,37 @@ mod tests {
         ] {
             assert_eq!(decide("GET", bad).map(|d| d.0), Some(403), "{bad}");
         }
-        assert_eq!(decide("POST", ALLOWED).map(|d| d.0), Some(405));
+        assert_eq!(decide("POST", ALLOWED).map(|d| d.0), Some(403));
         assert_eq!(decide("DELETE", "/containers/x").map(|d| d.0), Some(405));
+        assert_eq!(decide("PUT", ALLOWED).map(|d| d.0), Some(405));
+    }
+
+    #[test]
+    fn only_restart_of_one_full_id_passes() {
+        let id = "a".repeat(64);
+        let ok = restart_path(&id);
+        assert_eq!(decide("POST", &ok), None);
+        assert_eq!(restart_id(&ok), Some(id.as_str()));
+        assert_eq!(
+            decide("GET", &ok).map(|d| d.0),
+            Some(403),
+            "restart is POST only"
+        );
+        for bad in [
+            format!("/containers/{}/restart?t=10", "a".repeat(63)),
+            format!("/containers/{}/restart?t=10", "A".repeat(64)),
+            format!("/containers/{}/restart?t=10", "g".repeat(64)),
+            format!("/containers/{id}/restart"),
+            format!("/containers/{id}/restart?t=0"),
+            format!("/containers/{id}/restart?t=10&signal=KILL"),
+            format!("/containers/{id}/stop?t=10"),
+            format!("/containers/{id}/kill"),
+            format!("/containers/{id}/../{id}/restart?t=10"),
+            "/containers/redis/restart?t=10".into(),
+            "/containers//restart?t=10".into(),
+            format!("/v1.45/containers/{id}/restart?t=10"),
+        ] {
+            assert_eq!(decide("POST", &bad).map(|d| d.0), Some(403), "{bad}");
+        }
     }
 }
