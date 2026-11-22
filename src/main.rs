@@ -12,6 +12,7 @@
 mod api;
 mod collect;
 mod error;
+mod http;
 mod parse;
 mod rules;
 mod store;

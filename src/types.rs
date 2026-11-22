@@ -1,9 +1,9 @@
 //! The Snapshot: everything collected in one round. Served live by `/now` and stored
-//! (as JSON) with each incident. Field names are camelCase in JSON.
+//! (as JSON) with each incident, and read back by the UI. Field names are camelCase in JSON.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Host {
     pub hostname: String,
@@ -12,7 +12,7 @@ pub struct Host {
     pub load: [f64; 3],
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cpu {
     /// 0–100, busy share since the previous snapshot
@@ -21,7 +21,7 @@ pub struct Cpu {
     pub temp_c: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Memory {
     pub total_bytes: u64,
@@ -30,7 +30,7 @@ pub struct Memory {
     pub used_percent: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Disk {
     /// of "/", same formula as `df`
@@ -39,7 +39,7 @@ pub struct Disk {
     pub total_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetIface {
     pub name: String,
@@ -47,14 +47,14 @@ pub struct NetIface {
     pub tx_bytes_per_sec: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Network {
     /// real interfaces only: eth*, en*, wl*, tailscale*
     pub interfaces: Vec<NetIface>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Container {
     pub name: String,
@@ -62,7 +62,7 @@ pub struct Container {
     pub state: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Docker {
     pub running: u32,
@@ -70,7 +70,7 @@ pub struct Docker {
     pub containers: Vec<Container>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     /// ms since the Unix epoch

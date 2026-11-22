@@ -1,8 +1,5 @@
-//! Containers ← Docker's HTTP API on its unix socket, one GET, written by hand (no HTTP crate).
-//! HTTP/1.0 so Docker sends a plain body and closes the connection: read to end, done.
+//! Containers ← Docker's HTTP API on its unix socket: one GET through `crate::http`.
 
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,9 +7,6 @@ use serde::Deserialize;
 
 use crate::error::{Result, err};
 use crate::types::{Container, Docker};
-
-const REQUEST: &[u8] = b"GET /containers/json?all=true HTTP/1.0\r\nHost: docker\r\n\r\n";
-const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct ApiContainer {
@@ -22,24 +16,16 @@ struct ApiContainer {
     state: String,
 }
 
+/// A full raw HTTP response (used by tests).
+#[cfg(test)]
 pub fn parse_response(raw: &[u8]) -> Result<Docker> {
-    let text = std::str::from_utf8(raw).map_err(|_| err("docker: response is not UTF-8"))?;
-    let (head, body) = text
-        .split_once("\r\n\r\n")
-        .ok_or_else(|| err("docker: no end of headers"))?;
-    let status = head
-        .lines()
-        .next()
-        .and_then(|l| l.split_whitespace().nth(1))
-        .unwrap_or("");
-    if status != "200" {
+    let (status, body) = crate::http::parse_response(raw)?;
+    parse(status, &body)
+}
+
+fn parse(status: u16, body: &str) -> Result<Docker> {
+    if status != 200 {
         return Err(err(format!("docker: HTTP {status}")));
-    }
-    if head
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        return Err(err("docker: chunked response not supported"));
     }
     let list: Vec<ApiContainer> = serde_json::from_str(body)?;
     let mut containers: Vec<Container> = list
@@ -63,14 +49,9 @@ pub fn parse_response(raw: &[u8]) -> Result<Docker> {
 
 /// Any failure (no Docker, no permission, timeout, bad answer) → Err; the caller stores None.
 pub fn read(socket: &Path, timeout: Duration) -> Result<Docker> {
-    let mut stream = UnixStream::connect(socket)
-        .map_err(|e| err(format!("docker: {}: {e}", socket.display())))?;
-    stream.set_read_timeout(Some(timeout))?;
-    stream.set_write_timeout(Some(timeout))?;
-    stream.write_all(REQUEST)?;
-    let mut raw = Vec::new();
-    stream.take(MAX_RESPONSE).read_to_end(&mut raw)?;
-    parse_response(&raw)
+    let (status, body) = crate::http::get(socket, "/containers/json?all=true", timeout)
+        .map_err(|e| err(format!("docker: {e}")))?;
+    parse(status, &body)
 }
 
 #[cfg(test)]
