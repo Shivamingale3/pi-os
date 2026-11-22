@@ -229,6 +229,35 @@ impl<'f> Canvas<'f> {
         );
     }
 
+    /// Fill with transparency (0–255), e.g. the area under a chart line or a press highlight.
+    pub fn fill_alpha(&mut self, path: &Path, c: Rgb, alpha: u8) {
+        let mut p = paint(c);
+        p.set_color_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, alpha);
+        self.pm
+            .fill_path(path, &p, FillRule::Winding, Transform::identity(), None);
+    }
+
+    /// `r` filled with `c`, clipped to the pill shape of `pill` (for segmented bars).
+    pub fn fill_clipped(&mut self, r: Rect, pill: Rect, c: Rgb) {
+        let shape = rounded(pill, pill.h / 2.0);
+        let mut mask = Mask::new(self.pm.width(), self.pm.height()).expect("mask");
+        mask.fill_path(&shape, FillRule::Winding, true, Transform::identity());
+        if let Some(sr) = SkRect::from_xywh(r.x, r.y, r.w, r.h) {
+            self.pm
+                .fill_rect(sr, &paint(c), Transform::identity(), Some(&mask));
+        }
+    }
+
+    /// A thin stroke with square ends (dashes).
+    pub fn stroke_flat(&mut self, path: &Path, c: Rgb, width: f32) {
+        let s = Stroke {
+            width,
+            ..Default::default()
+        };
+        self.pm
+            .stroke_path(path, &paint(c), &s, Transform::identity(), None);
+    }
+
     pub fn stroke(&mut self, path: &Path, c: Rgb, width: f32) {
         let s = Stroke {
             width,

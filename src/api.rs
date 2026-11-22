@@ -104,15 +104,24 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
 
     if let Some(tile) = path.strip_prefix("/details/") {
         let snap = live.read().ok().and_then(|g| g.clone());
-        let docker = std::env::var_os("PIOS_DOCKER_SOCKET").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"));
+        let docker = std::env::var_os("PIOS_DOCKER_SOCKET")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"));
         let r = match tile {
             "cpu" => crate::details::cpu().map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            "temps" => crate::details::temps().map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            "memory" => crate::details::memory(snap.as_ref()).map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            "disk" => crate::details::disk(&docker).map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
+            "temps" => {
+                crate::details::temps().map(|d| serde_json::to_value(d).unwrap_or(Value::Null))
+            }
+            "memory" => crate::details::memory(snap.as_ref())
+                .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
+            "disk" => crate::details::disk(&docker)
+                .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
             _ => return (404, json!({"error": "details: cpu, temps, memory or disk"})),
         };
-        return r.map(|v| (200, v)).unwrap_or_else(|e| (500, json!({"error": e.to_string()})));
+        return r
+            .map(|v| (200, v))
+            .unwrap_or_else(|e| (500, json!({"error": e.to_string()})));
     }
 
     let Some(db) = db else {

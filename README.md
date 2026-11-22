@@ -39,6 +39,7 @@ curl --unix-socket data/pios.sock http://pios/now
 | `GET /trend?metric=NAME` | last 24 h: `{"metric", "windowMs", "points": [[ts, value], …]}` |
 | `GET /incidents` | the last 7 days, newest first, without snapshots |
 | `GET /incidents/ID` | one incident with `snapshots.start`, `.peak` and `.end` |
+| `GET /details/TILE` | `cpu`, `temps`, `memory` or `disk`, collected on request (only while that screen is open) |
 
 Trend metrics: `cpu.percent` · `cpu.tempC` · `mem.usedPercent` · `disk.usedPercent` · `load.1m` ·
 `net.rxBytesPerSec` · `net.txBytesPerSec`.
@@ -59,12 +60,20 @@ times are the first bad and first clear readings.
 
 `pios ui` draws the 480 × 320 screens from the agent's API with **tiny-skia** (anti-aliased 2D) and
 **ab_glyph** (TrueType text), using the bundled Inter and JetBrains Mono fonts (SIL OFL, in
-`assets/fonts/`). So far it draws **Home**: on the panel (`--fb`), to a PNG, or in a laptop preview window
-(a mouse click acts as a tap).
+`assets/fonts/`). It draws **Home**, and a tap on a Home tile opens its detail screen: **CPU** (per-core load and
+frequency, load average, 24 h graph, busiest processes), **Temperatures** (every sensor with its
+limits, the fan), **Memory** (apps / kernel / cache / free, zram or swap, biggest users) and **Disk**
+(filesystems, the drive, live read/write, Docker disk usage). **History** lists the last 7 days of
+incidents; a row opens its start, peak and end snapshots. Each screen has a 44 px back button.
+Detail data is collected only while its screen is open (`GET /details/{cpu,temps,memory,disk}`).
+
+Output goes to the panel (`--fb`), to a PNG, or to a laptop preview window, where a mouse click acts
+as a tap.
 
 ```bash
 pios ui --png home.png                          # one frame from the running agent
-pios ui --sample worst --png worst.png          # a built-in example: good, attention, down, waiting, worst
+pios ui --sample worst --screen cpu --png cpu.png  # examples: good, attention, down, waiting, worst
+                                                # screens: home, cpu, temps, memory, disk, history, incident
 pios ui --check                                 # prove the spacing rules on every example
 cargo run --features preview -- ui --preview    # live window on a laptop (never in the Pi build)
 ```
@@ -81,9 +90,9 @@ the boxes:
 | touch targets | at least 44 × 44 px |
 | text | must fit its slot: big numbers shrink (down to 20 px), other text is cut with "…" |
 
-Tests run the check on more than 5,000 combinations of extreme data (long hostnames, 100 %, 105 °C,
-1023 GB, 120 containers, 12 open problems) and compare each example with a golden PNG in
-`tests/golden/`. After an intended visual change, run `UPDATE_GOLDEN=1 cargo test`.
+Tests run the check on every screen with thousands of combinations of extreme data (long names,
+100 %, 105 °C, petabytes, 256 cores, 12 open problems, empty and missing data) and compare each
+example with a golden PNG in `tests/golden/`. After an intended visual change, run `UPDATE_GOLDEN=1 cargo test`.
 
 ## On the Pi
 
@@ -93,10 +102,10 @@ binary and are installed by `pios setup`.
 | Unit | Runs as | What |
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
-| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`; anything else gets 403 |
+| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true` and `GET /system/df`; anything else gets 403 |
 | `pios-ui.service` (**installed, not enabled**) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it). `Conflicts=tft-btop.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 
-`systemd-analyze security` rates the agent 0.8, the helper 0.7 and the screen 0.8 ("SAFE").
+`systemd-analyze security` rates the agent 1.0 ("OK"; it may read other processes' CPU use for the CPU screen), the helper 0.7 and the screen 0.8 ("SAFE").
 
 ```bash
 sudo systemctl start pios-ui     # PiOS takes the panel (stops tft-btop)

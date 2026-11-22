@@ -47,7 +47,11 @@ fn handle(stream: &mut UnixStream, docker: &Path) -> std::io::Result<()> {
     let Some(path) = ALLOWLIST.iter().find(|p| **p == target) else {
         return http::respond(stream, 403, r#"{"error":"not allowed"}"#);
     };
-    let timeout = if *path == DOCKER_DF { Duration::from_secs(10) } else { DOCKER_TIMEOUT };
+    let timeout = if *path == DOCKER_DF {
+        Duration::from_secs(10)
+    } else {
+        DOCKER_TIMEOUT
+    };
     match http::get(docker, path, timeout) {
         Ok((status, body)) => http::respond(stream, status, &body),
         Err(e) => http::respond(

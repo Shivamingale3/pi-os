@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::collect::cpu::{Ticks, percent, parse_stat};
+use crate::collect::cpu::{Ticks, parse_stat, percent};
 use crate::error::{Result, err, read_file};
 use crate::parse::{parse_f64, parse_u64};
 use crate::types::Snapshot;
@@ -167,9 +167,13 @@ pub fn parse_proc_stat(text: &str) -> Option<(String, u64)> {
 
 fn proc_times() -> HashMap<u32, (String, u64)> {
     let mut out = HashMap::new();
-    let Ok(dir) = std::fs::read_dir("/proc") else { return out };
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return out;
+    };
     for e in dir.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
         if let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/stat"))
             && let Some(v) = parse_proc_stat(&text)
         {
@@ -180,7 +184,13 @@ fn proc_times() -> HashMap<u32, (String, u64)> {
 }
 
 /// Per-name CPU use between two process scans, % of one core, busiest first.
-pub fn busiest(a: &HashMap<u32, (String, u64)>, b: &HashMap<u32, (String, u64)>, total_ticks: u64, cores: usize, n: usize) -> Vec<Usage> {
+pub fn busiest(
+    a: &HashMap<u32, (String, u64)>,
+    b: &HashMap<u32, (String, u64)>,
+    total_ticks: u64,
+    cores: usize,
+    n: usize,
+) -> Vec<Usage> {
     if total_ticks == 0 {
         return vec![];
     }
@@ -194,7 +204,10 @@ pub fn busiest(a: &HashMap<u32, (String, u64)>, b: &HashMap<u32, (String, u64)>,
     let mut v: Vec<Usage> = by_name
         .into_iter()
         .filter(|(_, d)| *d > 0)
-        .map(|(name, d)| Usage { name: name.to_string(), value: d as f64 / per_core * 100.0 })
+        .map(|(name, d)| Usage {
+            name: name.to_string(),
+            value: d as f64 / per_core * 100.0,
+        })
         .collect();
     v.sort_by(|x, y| y.value.total_cmp(&x.value).then(x.name.cmp(&y.name)));
     v.truncate(n);
@@ -202,7 +215,11 @@ pub fn busiest(a: &HashMap<u32, (String, u64)>, b: &HashMap<u32, (String, u64)>,
 }
 
 fn read_khz(path: String) -> u32 {
-    std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<u64>().ok()).map(|k| (k / 1000) as u32).unwrap_or(0)
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|k| (k / 1000) as u32)
+        .unwrap_or(0)
 }
 
 pub fn cpu() -> Result<CpuDetails> {
@@ -218,7 +235,9 @@ pub fn cpu() -> Result<CpuDetails> {
     let cores = (0..n)
         .map(|i| Core {
             percent: percent(a[i + 1], b[i + 1]),
-            mhz: read_khz(format!("/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq")),
+            mhz: read_khz(format!(
+                "/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_cur_freq"
+            )),
         })
         .collect();
     let load = crate::collect::host::parse_loadavg(&read_file("/proc/loadavg")?)?;
@@ -228,7 +247,10 @@ pub fn cpu() -> Result<CpuDetails> {
         load,
         min_mhz: read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq".into()),
         max_mhz: read_khz("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq".into()),
-        governor: std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").unwrap_or_default().trim().to_string(),
+        governor: std::fs::read_to_string("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+            .unwrap_or_default()
+            .trim()
+            .to_string(),
         top: busiest(&pa, &pb, b[0].total.saturating_sub(a[0].total), n, 3),
     })
 }
@@ -264,7 +286,8 @@ pub fn temps() -> Result<TempDetails> {
                 continue;
             }
             for i in 0..16 {
-                let ty = std::fs::read_to_string(p.join(format!("trip_point_{i}_type"))).unwrap_or_default();
+                let ty = std::fs::read_to_string(p.join(format!("trip_point_{i}_type")))
+                    .unwrap_or_default();
                 if ty.trim() == "active"
                     && let Some(t) = read_milli(&p.join(format!("trip_point_{i}_temp")))
                 {
@@ -279,35 +302,71 @@ pub fn temps() -> Result<TempDetails> {
     if let Ok(chips) = std::fs::read_dir("/sys/class/hwmon") {
         for c in chips.flatten() {
             let p = c.path();
-            let chip = std::fs::read_to_string(p.join("name")).unwrap_or_default().trim().to_string();
+            let chip = std::fs::read_to_string(p.join("name"))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
             if chip == "pwmfan" {
-                let rpm = std::fs::read_to_string(p.join("fan1_input")).ok().and_then(|s| s.trim().parse().ok());
-                fan = Some(Fan { rpm, step: 0, steps: 0, starts_at: fan_on });
+                let rpm = std::fs::read_to_string(p.join("fan1_input"))
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok());
+                fan = Some(Fan {
+                    rpm,
+                    step: 0,
+                    steps: 0,
+                    starts_at: fan_on,
+                });
                 continue;
             }
-            let Some((name, prio)) = sensor_name(&chip) else { continue };
-            let Some(celsius) = read_milli(&p.join("temp1_input")) else { continue };
+            let Some((name, prio)) = sensor_name(&chip) else {
+                continue;
+            };
+            let Some(celsius) = read_milli(&p.join("temp1_input")) else {
+                continue;
+            };
             if found.iter().any(|(_, s)| s.name == name) {
                 continue;
             }
             let limit = read_milli(&p.join("temp1_max"));
             let critical = read_milli(&p.join("temp1_crit"));
             let is_cpu = name == "CPU";
-            found.push((prio, Sensor { name: name.to_string(), celsius, fan_on: if is_cpu { fan_on } else { None }, limit, critical }));
+            found.push((
+                prio,
+                Sensor {
+                    name: name.to_string(),
+                    celsius,
+                    fan_on: if is_cpu { fan_on } else { None },
+                    limit,
+                    critical,
+                },
+            ));
         }
     }
     // fan speed step from the matching cooling device
     if let (Some(f), Ok(devs)) = (fan.as_mut(), std::fs::read_dir("/sys/class/thermal")) {
         for d in devs.flatten() {
             let p = d.path();
-            if std::fs::read_to_string(p.join("type")).unwrap_or_default().trim() == "pwm-fan" {
-                f.step = std::fs::read_to_string(p.join("cur_state")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-                f.steps = std::fs::read_to_string(p.join("max_state")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+            if std::fs::read_to_string(p.join("type"))
+                .unwrap_or_default()
+                .trim()
+                == "pwm-fan"
+            {
+                f.step = std::fs::read_to_string(p.join("cur_state"))
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                f.steps = std::fs::read_to_string(p.join("max_state"))
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
             }
         }
     }
     found.sort_by_key(|(prio, _)| *prio);
-    Ok(TempDetails { sensors: found.into_iter().map(|(_, s)| s).collect(), fan })
+    Ok(TempDetails {
+        sensors: found.into_iter().map(|(_, s)| s).collect(),
+        fan,
+    })
 }
 
 // ---------------- memory ----------------
@@ -324,7 +383,10 @@ pub fn parse_meminfo_kb(text: &str) -> HashMap<String, u64> {
 
 pub fn breakdown(m: &HashMap<String, u64>) -> Result<MemDetails> {
     let g = |k: &str| m.get(k).copied().unwrap_or(0);
-    let total = m.get("MemTotal").copied().ok_or_else(|| err("MemTotal missing"))?;
+    let total = m
+        .get("MemTotal")
+        .copied()
+        .ok_or_else(|| err("MemTotal missing"))?;
     let apps = g("AnonPages");
     let kernel = g("Slab") + g("PageTables") + g("KernelStack");
     let cache = g("Cached") + g("Buffers");
@@ -367,8 +429,14 @@ fn cgroup_memory(id: &str) -> Option<u64> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    for p in [format!("/sys/fs/cgroup/system.slice/docker-{id}.scope/memory.current"), format!("/sys/fs/cgroup/docker/{id}/memory.current")] {
-        if let Some(v) = std::fs::read_to_string(&p).ok().and_then(|s| s.trim().parse().ok()) {
+    for p in [
+        format!("/sys/fs/cgroup/system.slice/docker-{id}.scope/memory.current"),
+        format!("/sys/fs/cgroup/docker/{id}/memory.current"),
+    ] {
+        if let Some(v) = std::fs::read_to_string(&p)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
             return Some(v);
         }
     }
@@ -379,15 +447,25 @@ fn top_processes_rss(n: usize) -> Vec<Usage> {
     let mut by_name: HashMap<String, u64> = HashMap::new();
     if let Ok(dir) = std::fs::read_dir("/proc") {
         for e in dir.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
-            let rss = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok().and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok());
+            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            let rss = std::fs::read_to_string(format!("/proc/{pid}/statm"))
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok());
             let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok();
             if let (Some(rss), Some(name)) = (rss, name) {
                 *by_name.entry(name.trim().to_string()).or_default() += rss * 4096;
             }
         }
     }
-    let mut v: Vec<Usage> = by_name.into_iter().map(|(name, b)| Usage { name, value: b as f64 }).collect();
+    let mut v: Vec<Usage> = by_name
+        .into_iter()
+        .map(|(name, b)| Usage {
+            name,
+            value: b as f64,
+        })
+        .collect();
     v.sort_by(|x, y| y.value.total_cmp(&x.value));
     v.truncate(n);
     v
@@ -396,14 +474,23 @@ fn top_processes_rss(n: usize) -> Vec<Usage> {
 pub fn memory(live: Option<&Snapshot>) -> Result<MemDetails> {
     let mut d = breakdown(&parse_meminfo_kb(&read_file("/proc/meminfo")?))?;
     d.swap = std::fs::read_to_string("/proc/swaps").ok().and_then(|t| {
-        parse_swaps(&t, |dev| std::fs::read_to_string(format!("/sys/block/{dev}/comp_algorithm")).ok().and_then(|a| selected_algo(&a)))
+        parse_swaps(&t, |dev| {
+            std::fs::read_to_string(format!("/sys/block/{dev}/comp_algorithm"))
+                .ok()
+                .and_then(|a| selected_algo(&a))
+        })
     });
     let mut containers: Vec<Usage> = live
         .and_then(|s| s.docker.as_ref())
         .map(|dk| {
             dk.containers
                 .iter()
-                .filter_map(|c| Some(Usage { name: c.name.clone(), value: cgroup_memory(&c.id)? as f64 }))
+                .filter_map(|c| {
+                    Some(Usage {
+                        name: c.name.clone(),
+                        value: cgroup_memory(&c.id)? as f64,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -427,7 +514,9 @@ pub fn real_mounts(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for l in text.lines() {
         let f: Vec<&str> = l.split_whitespace().collect();
-        let (Some(dev), Some(mnt), Some(fs)) = (f.first(), f.get(1), f.get(2)) else { continue };
+        let (Some(dev), Some(mnt), Some(fs)) = (f.first(), f.get(1), f.get(2)) else {
+            continue;
+        };
         if !dev.starts_with("/dev/") || !FS.contains(fs) || out.iter().any(|(d, _)| d == dev) {
             continue;
         }
@@ -459,7 +548,8 @@ pub fn parent_disk(part: &str) -> String {
 pub fn diskstats(text: &str, disk: &str) -> Option<(u64, u64)> {
     text.lines().find_map(|l| {
         let f: Vec<&str> = l.split_whitespace().collect();
-        (f.get(2) == Some(&disk)).then(|| Some((f.get(5)?.parse().ok()?, f.get(9)?.parse().ok()?)))?
+        (f.get(2) == Some(&disk))
+            .then(|| Some((f.get(5)?.parse().ok()?, f.get(9)?.parse().ok()?)))?
     })
 }
 
@@ -504,11 +594,22 @@ pub fn parse_docker_df(body: &str) -> Result<DockerDf> {
         images: r.images.len() as u32,
         images_bytes: pos(r.layers_size),
         // image sizes count shared layers more than once: never claim more than the total
-        reclaimable: r.images.iter().filter(|i| i.containers == 0).map(|i| pos(i.size)).sum::<u64>().min(pos(r.layers_size)),
+        reclaimable: r
+            .images
+            .iter()
+            .filter(|i| i.containers == 0)
+            .map(|i| pos(i.size))
+            .sum::<u64>()
+            .min(pos(r.layers_size)),
         containers: r.containers.len() as u32,
         containers_bytes: r.containers.iter().map(|c| pos(c.size_rw)).sum(),
         volumes: r.volumes.len() as u32,
-        volumes_bytes: r.volumes.iter().filter_map(|v| v.usage.as_ref()).map(|u| pos(u.size)).sum(),
+        volumes_bytes: r
+            .volumes
+            .iter()
+            .filter_map(|v| v.usage.as_ref())
+            .map(|u| pos(u.size))
+            .sum(),
     })
 }
 
@@ -522,8 +623,11 @@ fn docker_df(socket: &Path) -> Option<DockerDf> {
     {
         return Some(v.clone());
     }
-    let (status, body) = crate::http::get(socket, crate::helper::DOCKER_DF, Duration::from_secs(10)).ok()?;
-    let v = (status == 200).then(|| parse_docker_df(&body).ok()).flatten()?;
+    let (status, body) =
+        crate::http::get(socket, crate::helper::DOCKER_DF, Duration::from_secs(10)).ok()?;
+    let v = (status == 200)
+        .then(|| parse_docker_df(&body).ok())
+        .flatten()?;
     if let Ok(mut g) = DOCKER_DF.lock() {
         *g = Some((Instant::now(), v.clone()));
     }
@@ -535,10 +639,17 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
     let mut filesystems = Vec::new();
     for (_, mnt) in mounts.iter().take(3) {
         if let Ok(d) = crate::collect::disk::read(mnt) {
-            filesystems.push(Fs { mount: mnt.clone(), used: d.used_bytes, size: d.total_bytes });
+            filesystems.push(Fs {
+                mount: mnt.clone(),
+                used: d.used_bytes,
+                size: d.total_bytes,
+            });
         }
     }
-    let root_dev = mounts.iter().find(|(_, m)| m == "/").map(|(d, _)| parent_disk(d));
+    let root_dev = mounts
+        .iter()
+        .find(|(_, m)| m == "/")
+        .map(|(d, _)| parent_disk(d));
     let (mut read_bps, mut write_bps) = (0.0, 0.0);
     let mut drive = None;
     if let Some(dev) = &root_dev {
@@ -551,8 +662,15 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
             write_bps = b.1.saturating_sub(a.1) as f64 * 512.0 / s;
         }
         let sys = format!("/sys/block/{dev}");
-        let model = std::fs::read_to_string(format!("{sys}/device/model")).unwrap_or_default().trim().to_string();
-        let size = std::fs::read_to_string(format!("{sys}/size")).ok().and_then(|s| s.trim().parse::<u64>().ok()).unwrap_or(0) * 512;
+        let model = std::fs::read_to_string(format!("{sys}/device/model"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let size = std::fs::read_to_string(format!("{sys}/size"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0)
+            * 512;
         let kind = if dev.starts_with("nvme") {
             "NVMe"
         } else if dev.starts_with("mmcblk") {
@@ -560,10 +678,28 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
         } else {
             "drive"
         };
-        let celsius = if kind == "NVMe" { temps().ok().and_then(|t| t.sensors.into_iter().find(|s| s.name == "NVMe")).map(|s| s.celsius) } else { None };
-        drive = Some(Drive { model: if model.is_empty() { dev.clone() } else { model }, size, kind: kind.into(), celsius });
+        let celsius = if kind == "NVMe" {
+            temps()
+                .ok()
+                .and_then(|t| t.sensors.into_iter().find(|s| s.name == "NVMe"))
+                .map(|s| s.celsius)
+        } else {
+            None
+        };
+        drive = Some(Drive {
+            model: if model.is_empty() { dev.clone() } else { model },
+            size,
+            kind: kind.into(),
+            celsius,
+        });
     }
-    Ok(DiskDetails { filesystems, drive, read_bps, write_bps, docker: docker_df(docker_socket) })
+    Ok(DiskDetails {
+        filesystems,
+        drive,
+        read_bps,
+        write_bps,
+        docker: docker_df(docker_socket),
+    })
 }
 
 #[cfg(test)]
@@ -572,7 +708,9 @@ mod tests {
 
     #[test]
     fn ticks_per_core() {
-        let t = parse_all_ticks("cpu  10 0 0 90 0 0 0 0 0 0\ncpu0 5 0 0 45 0 0 0 0 0 0\ncpu1 5 0 0 45 0 0 0 0 0 0\nintr 1 2\n");
+        let t = parse_all_ticks(
+            "cpu  10 0 0 90 0 0 0 0 0 0\ncpu0 5 0 0 45 0 0 0 0 0 0\ncpu1 5 0 0 45 0 0 0 0 0 0\nintr 1 2\n",
+        );
         assert_eq!(t.len(), 3);
         assert_eq!(t[1].total, 50);
     }
@@ -597,15 +735,29 @@ mod tests {
         b.insert(4, ("new".to_string(), 99)); // started between scans: no baseline
         // 4 cores, 400 ticks total → 100 ticks per core
         let top = busiest(&a, &b, 400, 4, 3);
-        assert_eq!(top[0], Usage { name: "php-fpm".into(), value: 20.0 });
-        assert_eq!(top[1], Usage { name: "java".into(), value: 5.0 });
+        assert_eq!(
+            top[0],
+            Usage {
+                name: "php-fpm".into(),
+                value: 20.0
+            }
+        );
+        assert_eq!(
+            top[1],
+            Usage {
+                name: "java".into(),
+                value: 5.0
+            }
+        );
         assert_eq!(top.len(), 2);
         assert!(busiest(&a, &b, 0, 4, 3).is_empty());
     }
 
     #[test]
     fn memory_breakdown_from_pi() {
-        let m = parse_meminfo_kb("MemTotal: 8255792 kB\nMemFree: 5205856 kB\nMemAvailable: 6922992 kB\nBuffers: 161456 kB\nCached: 1604096 kB\nAnonPages: 972896 kB\nSlab: 137232 kB\nPageTables: 20160 kB\nKernelStack: 9328 kB\n");
+        let m = parse_meminfo_kb(
+            "MemTotal: 8255792 kB\nMemFree: 5205856 kB\nMemAvailable: 6922992 kB\nBuffers: 161456 kB\nCached: 1604096 kB\nAnonPages: 972896 kB\nSlab: 137232 kB\nPageTables: 20160 kB\nKernelStack: 9328 kB\n",
+        );
         let d = breakdown(&m).unwrap();
         assert_eq!(d.apps, 972896 * 1024);
         assert_eq!(d.kernel, (137232 + 20160 + 9328) * 1024);
@@ -617,7 +769,10 @@ mod tests {
     fn swaps_and_zram() {
         let t = "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n/dev/zram0                              partition\t2097136\t\t1024\t\t100\n";
         let s = parse_swaps(t, |d| (d == "zram0").then(|| "zstd".to_string())).unwrap();
-        assert_eq!((s.total, s.used, s.kind.as_str()), (2097136 * 1024, 1024 * 1024, "zram · zstd"));
+        assert_eq!(
+            (s.total, s.used, s.kind.as_str()),
+            (2097136 * 1024, 1024 * 1024, "zram · zstd")
+        );
         assert_eq!(selected_algo("lzo-rle lzo lz4 [zstd]"), Some("zstd".into()));
         assert!(parse_swaps("Filename Type Size Used Priority\n", |_| None).is_none());
         let f = parse_swaps("h\n/swapfile file 1000 0 -2\n", |_| None).unwrap();
@@ -627,7 +782,13 @@ mod tests {
     #[test]
     fn mounts_and_disks() {
         let m = "/dev/nvme0n1p2 / ext4 rw 0 0\nproc /proc proc rw 0 0\n/dev/nvme0n1p1 /boot/firmware vfat rw 0 0\noverlay /var/lib/docker/x overlay rw 0 0\n/dev/nvme0n1p2 /var/lib/docker ext4 rw 0 0\n";
-        assert_eq!(real_mounts(m), [("/dev/nvme0n1p2".into(), "/".into()), ("/dev/nvme0n1p1".into(), "/boot/firmware".into())]);
+        assert_eq!(
+            real_mounts(m),
+            [
+                ("/dev/nvme0n1p2".into(), "/".into()),
+                ("/dev/nvme0n1p1".into(), "/boot/firmware".into())
+            ]
+        );
         assert_eq!(parent_disk("/dev/nvme0n1p2"), "nvme0n1");
         assert_eq!(parent_disk("mmcblk0p1"), "mmcblk0");
         assert_eq!(parent_disk("sda2"), "sda");
@@ -641,7 +802,18 @@ mod tests {
     fn docker_df() {
         let body = r#"{"LayersSize":11430000000,"Images":[{"Size":1000,"Containers":1},{"Size":500,"Containers":0}],"Containers":[{"SizeRw":30},{"SizeRw":4}],"Volumes":[{"UsageData":{"Size":45}},{"UsageData":{"Size":-1}}]}"#;
         let d = parse_docker_df(body).unwrap();
-        assert_eq!((d.images, d.images_bytes, d.reclaimable, d.containers, d.containers_bytes, d.volumes, d.volumes_bytes), (2, 11430000000, 500, 2, 34, 2, 45));
+        assert_eq!(
+            (
+                d.images,
+                d.images_bytes,
+                d.reclaimable,
+                d.containers,
+                d.containers_bytes,
+                d.volumes,
+                d.volumes_bytes
+            ),
+            (2, 11430000000, 500, 2, 34, 2, 45)
+        );
         assert!(parse_docker_df("not json").is_err());
         let shared = r#"{"LayersSize":100,"Images":[{"Size":80,"Containers":0},{"Size":80,"Containers":0}]}"#;
         assert_eq!(parse_docker_df(shared).unwrap().reclaimable, 100);

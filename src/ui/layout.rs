@@ -51,6 +51,20 @@ pub enum Marker {
     Ring(Rgb),
 }
 
+/// Where a tap on a target goes. `Back` is resolved by the app from the current screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nav {
+    Home,
+    Cpu,
+    Temps,
+    Memory,
+    Disk,
+    History,
+    Page(usize),
+    Incident(i64),
+    Back,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Paint {
     None,
@@ -87,9 +101,37 @@ pub enum Paint {
         track: Rgb,
         fill: Rgb,
     },
+    /// a pill split into coloured parts (shares of the whole, left to right)
+    Segments {
+        parts: Vec<(f32, Rgb)>,
+        track: Rgb,
+    },
+    /// a 6 px bar centred in the box, with 2 px marks the full box height (limits)
+    Gauge {
+        pct: f32,
+        track: Rgb,
+        fill: Rgb,
+        marks: Vec<(f32, Rgb)>,
+    },
+    /// `n` pills across the box, the first `on` lit (fan speed steps)
+    Steps {
+        n: u32,
+        on: u32,
+        on_color: Rgb,
+        off_color: Rgb,
+    },
+    /// "‹" (or "›" when the flag is true) for back and paging buttons
+    Chevron(Rgb, bool),
+    /// area chart: filled under the line, optional dashed guide at a value
+    Area {
+        values: Vec<f32>,
+        min_span: f32,
+        color: Rgb,
+        guide: Option<f32>,
+    },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Item {
     pub name: String,
     pub rect: Rect,
@@ -100,9 +142,11 @@ pub struct Item {
     /// size the content needs (text width, line box); must fit in `rect`
     pub content: Option<(f32, f32)>,
     pub paint: Paint,
+    /// where a tap goes (touch targets only)
+    pub nav: Option<Nav>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct Tree {
     pub items: Vec<Item>,
 }
@@ -123,8 +167,15 @@ impl Tree {
             touch: false,
             content: None,
             paint,
+            nav: None,
         });
         self.items.len() - 1
+    }
+    /// Makes `i` a touch target that goes to `nav`.
+    pub fn nav(&mut self, i: usize, nav: Nav) -> usize {
+        self.items[i].touch = true;
+        self.items[i].nav = Some(nav);
+        i
     }
     pub fn pad(&mut self, i: usize, pad: f32) -> usize {
         self.items[i].pad = pad;
@@ -282,6 +333,63 @@ pub fn render(t: &Tree, c: &mut Canvas) {
                 color,
             } => sparkline(c, r, values, *min_span, *color),
             Paint::Bar { pct, track, fill } => c.bar(r, *pct, *track, *fill),
+            Paint::Segments { parts, track } => {
+                c.bar(r, 0.0, *track, *track);
+                let mut x = r.x;
+                let total: f32 = parts.iter().map(|p| p.0.max(0.0)).sum::<f32>().max(1.0);
+                for (share, col) in parts {
+                    let w = (r.w * share.max(0.0) / total).round();
+                    if w > 0.0 {
+                        c.fill_clipped(Rect::new(x, r.y, w, r.h), r, *col);
+                    }
+                    x += w;
+                }
+            }
+            Paint::Gauge {
+                pct,
+                track,
+                fill,
+                marks,
+            } => {
+                let bar = Rect::new(r.x, r.cy() - 3.0, r.w, 6.0);
+                c.bar(bar, *pct, *track, *fill);
+                for (at, col) in marks {
+                    let x = (r.x + r.w * at.clamp(0.0, 1.0) - 1.0).clamp(r.x, r.right() - 2.0);
+                    c.fill(&rounded(Rect::new(x, r.y, 2.0, r.h), 1.0), *col);
+                }
+            }
+            Paint::Steps {
+                n,
+                on,
+                on_color,
+                off_color,
+            } => {
+                let n = (*n).max(1);
+                let gap = 4.0;
+                let w = (r.w - gap * (n - 1) as f32) / n as f32;
+                for i in 0..n {
+                    let col = if i < *on { *on_color } else { *off_color };
+                    let x = r.x + i as f32 * (w + gap);
+                    c.fill(&rounded(Rect::new(x, r.y, w, r.h), r.h / 2.0), col);
+                }
+            }
+            Paint::Chevron(col, right) => {
+                let (cx, cy) = (r.x + r.w / 2.0, r.cy());
+                let d = if *right { -1.0 } else { 1.0 };
+                if let Some(p) = polyline(&[
+                    (cx + 2.5 * d, cy - 6.0),
+                    (cx - 3.5 * d, cy),
+                    (cx + 2.5 * d, cy + 6.0),
+                ]) {
+                    c.stroke(&p, *col, 2.2);
+                }
+            }
+            Paint::Area {
+                values,
+                min_span,
+                color,
+                guide,
+            } => area(c, r, values, *min_span, *color, *guide),
         }
     }
 }
@@ -367,6 +475,57 @@ fn marker(c: &mut Canvas, r: Rect, m: Marker) {
 }
 
 /// Values scaled to the box, with at least `min_span` of range so a flat line stays flat.
+/// Scales values into a box (lo at the bottom); keeps at least `min_span` of range.
+fn scale(values: &[f32], extra: Option<f32>, min_span: f32) -> (f32, f32) {
+    let mut lo = values.iter().copied().fold(f32::INFINITY, f32::min);
+    let mut hi = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if let Some(g) = extra {
+        lo = lo.min(g);
+        hi = hi.max(g);
+    }
+    let span = (hi - lo).max(min_span);
+    let mid = (hi + lo) / 2.0;
+    (mid - span / 2.0, span)
+}
+
+fn area(c: &mut Canvas, r: Rect, values: &[f32], min_span: f32, color: Rgb, guide: Option<f32>) {
+    if values.len() < 2 {
+        return;
+    }
+    let (lo, span) = scale(values, guide, min_span);
+    let (top, h) = (r.y + 1.0, r.h - 2.0);
+    let y_of = |v: f32| top + h - (v - lo) / span * h;
+    if let Some(g) = guide {
+        let y = y_of(g).round() + 0.5;
+        let mut x = r.x;
+        while x < r.right() {
+            if let Some(p) = polyline(&[(x, y), ((x + 3.0).min(r.right()), y)]) {
+                c.stroke_flat(&p, theme::INK3, 1.0);
+            }
+            x += 6.0;
+        }
+    }
+    let step = (r.w - 2.0) / (values.len() - 1) as f32;
+    let pts: Vec<(f32, f32)> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| (r.x + 1.0 + i as f32 * step, y_of(*v)))
+        .collect();
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(pts[0].0, r.bottom() - 1.0);
+    for p in &pts {
+        pb.line_to(p.0, p.1);
+    }
+    pb.line_to(pts[pts.len() - 1].0, r.bottom() - 1.0);
+    pb.close();
+    if let Some(p) = pb.finish() {
+        c.fill_alpha(&p, color, 26);
+    }
+    if let Some(p) = polyline(&pts) {
+        c.stroke(&p, color, 1.5);
+    }
+}
+
 fn sparkline(c: &mut Canvas, r: Rect, values: &[f32], min_span: f32, color: Rgb) {
     if values.len() < 2 {
         return;
