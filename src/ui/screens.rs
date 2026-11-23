@@ -2831,7 +2831,20 @@ pub fn settings(f: &Fonts, ring: &ring::Settings, prefs: &Prefs) -> Tree {
             },
             Nav::Night,
         ),
-        ("Fans", "case fan and Active Cooler".to_string(), Nav::Fans),
+        (
+            "Alerts",
+            {
+                let on = prefs
+                    .alerts
+                    .iter()
+                    .take(1)
+                    .chain(prefs.alerts.iter().skip(2))
+                    .filter(|a| **a)
+                    .count();
+                format!("Telegram · {on} of 5 types on")
+            },
+            Nav::Alerts,
+        ),
     ];
     let name_style = Style::new(Face::SemiBold, size::TITLE.0);
     for (i, (name, sub, nav)) in rows.into_iter().enumerate() {
@@ -3131,6 +3144,134 @@ pub fn night_screen(f: &Fonts, p: &Prefs) -> Tree {
         &mut b,
         row_y(4),
         "At night Home becomes a dim clock · problems still show on the ring",
+    );
+    b.t
+}
+
+/// Settings → Alerts: whether sending works, the main switches, a test button.
+pub fn alerts_screen(
+    f: &Fonts,
+    p: &Prefs,
+    status: Option<&crate::alerts::Status>,
+    test_sent: bool,
+    at: &dyn Fn(i64) -> (String, String),
+) -> Tree {
+    use prefs::Change;
+    let mut b = B::new(f);
+    b.header("Alerts", "");
+    // how sending goes, in words
+    let (line, tone) = match status {
+        None => ("Reading…".to_string(), INK3),
+        Some(s) if !s.configured => (
+            "Not set up: put a Telegram bot token in /etc/pios/telegram".to_string(),
+            status_colors(Status::Attention).text,
+        ),
+        Some(s) if !s.chat => (
+            "Almost: send your bot any message once".to_string(),
+            status_colors(Status::Attention).text,
+        ),
+        Some(s) if s.error.is_some() => (
+            format!("Can’t send: {}", s.error.as_deref().unwrap_or("")),
+            status_colors(Status::Down).text,
+        ),
+        Some(s) => (
+            match s.last_sent {
+                Some(t) => format!("Telegram · last sent {} {}", at(t).0, at(t).1),
+                None => "Telegram · ready, nothing sent yet".to_string(),
+            },
+            INK2,
+        ),
+    };
+    let (c, r) = b.card("status", Rect::new(M, TOP, WIDTH, 52.0), "", "");
+    b.text(
+        c,
+        "line",
+        Rect::new(r.x, r.y + 5.0, r.w, 18.0),
+        &line,
+        body(),
+        tone,
+    );
+    let y0 = TOP + 52.0 + GAP;
+    let on = |i: usize| (!p.alerts[i]) as usize;
+    choice_row(&mut b, y0, "Problems", &["On", "Off"], on(0), &|i| {
+        Nav::Pref(Change::Alert(0, i == 0))
+    });
+    choice_row(
+        &mut b,
+        y0 + 52.0,
+        "Quiet at night",
+        &["On", "Off"],
+        on(1),
+        &|i| Nav::Pref(Change::Alert(1, i == 0)),
+    );
+    // two buttons: test, more types
+    let y = y0 + 104.0;
+    let w = (WIDTH - GAP) / 2.0;
+    for (i, (name, label, nav)) in [
+        (
+            "test",
+            if test_sent {
+                "Test sent ✓"
+            } else {
+                "Send test message"
+            },
+            Nav::AlertTest,
+        ),
+        ("types", "More alert types", Nav::AlertTypes),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let r = Rect::new(M + i as f32 * (w + GAP), y, w, 44.0);
+        let bt = b.t.add(
+            None,
+            name,
+            r,
+            Paint::Panel {
+                fill: theme::SURFACE,
+                radius: theme::RADIUS_TILE,
+                border: None,
+            },
+        );
+        b.t.nav(bt, nav);
+        b.t.pad(bt, 8.0);
+        let st = Style::new(Face::SemiBold, size::BODY.0);
+        let lw = b.f.width(&st, label).min(r.w - 16.0);
+        b.text(
+            bt,
+            "label",
+            Rect::new(r.x + (r.w - lw) / 2.0, r.y + 8.0, lw, 28.0),
+            label,
+            st,
+            INK,
+        );
+    }
+    b.t
+}
+
+/// Settings → Alerts → More alert types.
+pub fn alert_types_screen(f: &Fonts, p: &Prefs) -> Tree {
+    use prefs::Change;
+    let mut b = B::new(f);
+    b.header("Alert types", "");
+    for (row, (i, label)) in [
+        (2usize, "Failed SSH"),
+        (3, "Deploys, reboots"),
+        (4, "SSH logins"),
+        (5, "sudo"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let off = (!p.alerts[i]) as usize;
+        choice_row(&mut b, row_y(row), label, &["On", "Off"], off, &move |c| {
+            Nav::Pref(Change::Alert(i as u8, c == 0))
+        });
+    }
+    settings_note(
+        &mut b,
+        row_y(4),
+        "Problems and their recovery are on the Alerts page",
     );
     b.t
 }

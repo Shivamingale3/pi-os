@@ -200,6 +200,16 @@ pub fn setup(deploy_key: Option<&Path>) -> Result<()> {
 
     fs::create_dir_all(CHECKS_DIR)?;
     fs::set_permissions(CHECKS_DIR, fs::Permissions::from_mode(0o755))?;
+    // the Telegram bot token (pios-web's credential): an empty, root-only file until you fill it
+    let tg = format!("{CHECKS_DIR}/telegram");
+    if !Path::new(&tg).exists() {
+        fs::write(
+            &tg,
+            "# Telegram bot token on line 1 (from @BotFather); optional chat ID on line 2\n",
+        )?;
+        fs::set_permissions(&tg, fs::Permissions::from_mode(0o600))?;
+        println!("  created {tg} (empty: phone alerts are off until you add a bot token)");
+    }
     write_if_changed(
         &format!("{CHECKS_DIR}/checks.example"),
         CHECKS_EXAMPLE,
@@ -247,6 +257,7 @@ pub fn uninstall(keep_data: bool) -> Result<()> {
     remove(&format!("{CHECKS_DIR}/checks.example"));
     if !keep_data {
         remove(&format!("{CHECKS_DIR}/checks"));
+        remove(&format!("{CHECKS_DIR}/telegram"));
     }
     let _ = fs::remove_dir(CHECKS_DIR); // only if empty
     if user_exists("pios-deploy") {
@@ -343,6 +354,8 @@ mod tests {
             "MemoryMax=48M",
             "CPUQuota=10%",
             "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
+            "LoadCredential=telegram:/etc/pios/telegram",
+            "SupplementaryGroups=pios",
         ] {
             assert!(web.lines().any(|l| l == line), "web unit lacks {line}");
         }

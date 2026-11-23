@@ -30,6 +30,8 @@ pub enum Screen {
     Night,
     /// the dim clock shown at night when nobody touches the screen
     NightFace,
+    Alerts,
+    AlertTypes,
 }
 
 impl Screen {
@@ -50,6 +52,8 @@ impl Screen {
             "display" => Screen::Display,
             "night" => Screen::Night,
             "nightface" => Screen::NightFace,
+            "alerts" => Screen::Alerts,
+            "alerttypes" => Screen::AlertTypes,
             "container" => Screen::Container(0),
             _ => return None,
         })
@@ -74,7 +78,7 @@ pub fn hist_tab_for(name: &str) -> screens::HistTab {
     }
 }
 
-pub const SCREENS: [&str; 18] = [
+pub const SCREENS: [&str; 20] = [
     "home",
     "cpu",
     "temps",
@@ -93,6 +97,8 @@ pub const SCREENS: [&str; 18] = [
     "display",
     "night",
     "nightface",
+    "alerts",
+    "alerttypes",
 ];
 
 /// The refresh icon spins at least this long, so a fast fetch is still seen to happen.
@@ -138,6 +144,10 @@ pub struct App {
     /// display, clock and night settings, and where they're saved
     pub prefs: super::prefs::Prefs,
     pub prefs_path: Option<std::path::PathBuf>,
+    /// phone alerts: what pios web reports, settings to hand the agent, a test to queue
+    pub alert_status: Option<crate::alerts::Status>,
+    pub alert_sync: bool,
+    pub alert_test: Option<Instant>,
     /// where Fans' back button goes (Temperatures or Settings)
     fans_from: Option<Screen>,
     /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
@@ -260,6 +270,15 @@ impl App {
                 self.prefs.apply(c);
                 self.prefs.save(self.prefs_path.as_deref());
                 super::set_clock24(self.prefs.clock24);
+                // alert switches and the night window go to the agent (it applies them)
+                self.alert_sync = true;
+                self.screen()
+            }
+            Nav::Alerts => Screen::Alerts,
+            Nav::AlertTypes => Screen::AlertTypes,
+            Nav::AlertTest => {
+                self.alert_test = Some(Instant::now());
+                self.last.remove("alerts");
                 self.screen()
             }
             Nav::Ring => Screen::Ring,
@@ -292,7 +311,8 @@ impl App {
                 Screen::Incident(_) => Screen::History,
                 Screen::Container(_) => Screen::Services,
                 Screen::Fans => self.fans_from.take().unwrap_or(Screen::Temps),
-                Screen::Ring | Screen::Display | Screen::Night => Screen::Settings,
+                Screen::Ring | Screen::Display | Screen::Night | Screen::Alerts => Screen::Settings,
+                Screen::AlertTypes => Screen::Alerts,
                 _ => Screen::Home,
             },
         };
@@ -334,6 +354,8 @@ impl App {
             Screen::Fans => v.push(("temps", s(5))),
             Screen::Settings | Screen::Ring | Screen::Display | Screen::Night => {}
             Screen::NightFace => {}
+            Screen::Alerts => v.push(("alerts", s(5))),
+            Screen::AlertTypes => {}
             Screen::Container(_) => v.push(("services", s(3))),
         }
         v
@@ -345,6 +367,24 @@ impl App {
             return false;
         }
         let mut any = false;
+        if self.alert_sync {
+            let q = self.prefs.alert_query();
+            if crate::http::post(
+                socket,
+                &format!("/alerts/prefs?{q}"),
+                Duration::from_secs(2),
+            )
+            .is_ok()
+            {
+                self.alert_sync = false;
+            }
+        }
+        if let Some(t) = self.alert_test
+            && self.last.get("alert_test").is_none_or(|l| *l < t)
+        {
+            let _ = crate::http::post(socket, "/alerts/test", Duration::from_secs(2));
+            self.last.insert("alert_test", now);
+        }
         for (key, every) in self.needs() {
             if !self.due(key, every, now) {
                 continue;
@@ -400,6 +440,9 @@ impl App {
                             }
                         }
                     }
+                }
+                "alerts" => {
+                    self.alert_status = super::get_json(socket, "/alerts/status").ok();
                 }
                 "events" => {
                     self.events = super::get_json::<EventsOut>(socket, "/events")
@@ -553,6 +596,15 @@ impl App {
             Screen::Settings => screens::settings(f, &self.ring, &self.prefs),
             Screen::Display => screens::display_screen(f, &self.prefs),
             Screen::Night => screens::night_screen(f, &self.prefs),
+            Screen::Alerts => screens::alerts_screen(
+                f,
+                &self.prefs,
+                self.alert_status.as_ref(),
+                self.alert_test
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(30)),
+                at,
+            ),
+            Screen::AlertTypes => screens::alert_types_screen(f, &self.prefs),
             Screen::NightFace => {
                 let h = Home::build(&self.home, time, date);
                 let temp = self

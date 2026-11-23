@@ -150,6 +150,7 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     app.prefs_path = o.state_dir.as_ref().map(|d| d.join("settings.conf"));
     app.prefs = super::prefs::Prefs::load(app.prefs_path.as_deref());
     super::set_clock24(app.prefs.clock24);
+    app.alert_sync = true; // the agent gets the alert settings at every start
     let ring_state: super::ring::Shared =
         std::sync::Arc::new(std::sync::Mutex::new(super::ring::State {
             status: theme::Status::Unknown,
