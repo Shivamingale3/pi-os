@@ -1221,6 +1221,41 @@ mod tests {
                 assert_eq!(tr.items[i].nav, Some(Nav::Home));
             }
         }
+        // alerts: every status, and the types page
+        let st = |c, ch, e: Option<&str>, last| crate::alerts::Status {
+            configured: c,
+            chat: ch,
+            error: e.map(String::from),
+            last_sent: last,
+        };
+        let long =
+            "Bad Request: chat not found and a much longer reason than usual from the server";
+        for status in [
+            None,
+            Some(st(false, false, None, None)),
+            Some(st(
+                true,
+                false,
+                Some("send your bot any message once"),
+                None,
+            )),
+            Some(st(true, true, Some(long), None)),
+            Some(st(true, true, None, None)),
+            Some(st(true, true, None, Some(NOW_MS))),
+        ] {
+            for test in [false, true] {
+                let t = crate::ui::screens::alerts_screen(
+                    &f,
+                    &a.prefs,
+                    status.as_ref(),
+                    test,
+                    &crate::ui::utc_at,
+                );
+                let v = layout::check(&t);
+                assert!(v.is_empty(), "alerts {status:?}: {v:#?}");
+            }
+        }
+        assert!(layout::check(&crate::ui::screens::alert_types_screen(&f, &a.prefs)).is_empty());
         // boot: every step, long uptimes
         for (up, sys, agent, n) in [
             (3, false, false, 0),
@@ -1275,14 +1310,21 @@ mod tests {
         assert!(a.ring_preview.is_some(), "a choice plays on the ring");
         tap(&mut a, "back");
         assert_eq!(a.screen(), Screen::Settings);
-        tap(&mut a, "Fans");
-        assert_eq!(a.screen(), Screen::Fans);
-        tap(&mut a, "back");
-        assert_eq!(
-            a.screen(),
-            Screen::Settings,
-            "back goes where Fans was opened from"
+        tap(&mut a, "Alerts");
+        assert_eq!(a.screen(), Screen::Alerts);
+        tap(&mut a, "types");
+        assert_eq!(a.screen(), Screen::AlertTypes);
+        tap(&mut a, "On"); // the first row: Failed SSH (already on)
+        assert!(
+            a.prefs.alerts[2] && a.alert_sync,
+            "a switch goes to the agent"
         );
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Alerts);
+        tap(&mut a, "test");
+        assert!(a.alert_test.is_some());
+        tap(&mut a, "back");
+        assert_eq!(a.screen(), Screen::Settings);
         tap(&mut a, "back");
         assert_eq!(a.screen(), Screen::Home);
         // Temperatures' fan card opens Fans, and back returns there

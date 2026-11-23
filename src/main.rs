@@ -20,6 +20,7 @@
 //!   PIOS_CHECKS         host services + hostnames   (default /etc/pios/checks, see checks.rs)
 //!   PIOS_WEB_OUT        `pios web` results file      (default /run/pios-web/web.json)
 
+mod alerts;
 mod api;
 mod checks;
 mod collect;
@@ -34,6 +35,7 @@ mod services;
 mod setup;
 mod signals;
 mod store;
+mod telegram;
 mod types;
 mod ui;
 mod update;
@@ -75,13 +77,37 @@ fn fmt_value(v: Option<f64>) -> String {
 struct Incidents {
     open: HashMap<String, i64>,
     peaks: HashMap<i64, (i64, f64, Box<Snapshot>)>,
+    /// problems already alerted (key → title, severity, started), kept across agent restarts so a
+    /// deploy doesn't re-send "down" for a problem that's still the same one
+    alerted: HashMap<String, (String, String, i64)>,
 }
+
+const ALERTED: &str = "alerted";
 
 impl Incidents {
     fn apply(&mut self, store: &Store, action: Action) -> Result<()> {
         match action {
             Action::Open(o) => {
                 let id = store.insert_incident(&o)?;
+                if !self.alerted.contains_key(&o.key) {
+                    let sev = o.severity.as_str();
+                    let value = if o.kind == rules::Kind::Metric {
+                        o.peak_value
+                    } else {
+                        None
+                    };
+                    store.insert_alert(
+                        o.started_at,
+                        alerts::PROBLEM,
+                        sev,
+                        &alerts::problem_text(&o.title, sev, value),
+                    )?;
+                    self.alerted.insert(
+                        o.key.clone(),
+                        (o.title.clone(), sev.to_string(), o.started_at),
+                    );
+                    self.save_alerted(store);
+                }
                 eprintln!(
                     "pios: incident #{id} opened: {} [{}]{}",
                     o.title,
@@ -94,6 +120,19 @@ impl Incidents {
                 if let Some(&id) = self.open.get(&key) {
                     store.update_severity(id, severity)?;
                     eprintln!("pios: incident #{id} is now {}", severity.as_str());
+                    if severity.as_str() == "critical"
+                        && let Some(a) = self.alerted.get_mut(&key)
+                        && a.1 != "critical"
+                    {
+                        a.1 = "critical".into();
+                        store.insert_alert(
+                            now_ms(),
+                            alerts::PROBLEM,
+                            "critical",
+                            &alerts::escalated_text(&a.0),
+                        )?;
+                        self.save_alerted(store);
+                    }
                 }
             }
             Action::Peak {
@@ -117,7 +156,48 @@ impl Incidents {
                     store.close_incident(id, ended_at, reason, &snapshot)?;
                     eprintln!("pios: incident #{id} closed: {reason}");
                 }
+                // the agent stopping isn't a recovery: keep it alerted, so it isn't sent twice
+                if reason != "agent stopped" {
+                    self.recovered(store, &key, ended_at, reason == "recovered")?;
+                }
             }
+        }
+        Ok(())
+    }
+
+    fn save_alerted(&self, store: &Store) {
+        if let Ok(j) = serde_json::to_string(&self.alerted) {
+            log_err("alerts", store.set_kv(ALERTED, &j));
+        }
+    }
+
+    /// The problem is over: "✅ Recovered" (unless it was only removed, or no longer checked).
+    fn recovered(&mut self, store: &Store, key: &str, at: i64, notify: bool) -> Result<()> {
+        if let Some((title, sev, started)) = self.alerted.remove(key) {
+            if notify {
+                store.insert_alert(
+                    at,
+                    alerts::RECOVERED,
+                    &sev,
+                    &alerts::recovered_text(&title, at - started),
+                )?;
+            }
+            self.save_alerted(store);
+        }
+        Ok(())
+    }
+
+    /// A while after start: problems alerted before a restart that didn't come back are over.
+    fn settle(&mut self, store: &Store, now: i64) -> Result<()> {
+        let still: Vec<String> = self.open.keys().cloned().collect();
+        let gone: Vec<String> = self
+            .alerted
+            .keys()
+            .filter(|k| !still.contains(k))
+            .cloned()
+            .collect();
+        for k in gone {
+            self.recovered(store, &k, now, true)?;
         }
         Ok(())
     }
@@ -157,13 +237,20 @@ fn poll_events(store: &Store, boots: bool) -> Result<()> {
     const CURSOR: &str = "journal_cursor";
     let cursor = store.get_kv(CURSOR);
     let (list, next) = events::read_journal(cursor.as_deref())?;
-    store.insert_events(&list)?;
+    let mut new = store.insert_events(&list)?;
     if let Some(c) = next {
         store.set_kv(CURSOR, &c)?;
     }
     if boots {
         let list: Vec<events::Event> = events::read_boots()?.into_iter().map(|(_, e)| e).collect();
-        store.insert_events(&list)?;
+        new.extend(store.insert_events(&list)?);
+    }
+    // phone alerts for what just happened (not for history read back on a first run)
+    let recent = now_ms() - 10 * 60_000;
+    for e in new.iter().filter(|e| e.ts >= recent) {
+        if let Some((kind, text)) = alerts::from_event(e) {
+            store.insert_alert(e.ts, kind, "", &text)?;
+        }
     }
     Ok(())
 }
@@ -199,7 +286,13 @@ fn agent() -> Result<()> {
     let mut incidents = Incidents {
         open: HashMap::new(),
         peaks: HashMap::new(),
+        alerted: store
+            .get_kv(ALERTED)
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     };
+    let started = Instant::now();
+    let mut settled = false;
     eprintln!(
         "pios: agent {} running · db {} · api {}",
         env!("CARGO_PKG_VERSION"),
@@ -246,6 +339,12 @@ fn agent() -> Result<()> {
             log_err("trend prune", store.prune_trend(snap.ts));
             log_err("peaks", incidents.flush_peaks(&store));
         }
+        // 90 s after start (incidents reopen after 30 s bad): alerted problems that didn't
+        // come back recovered while the agent was down
+        if !settled && started.elapsed() >= Duration::from_secs(90) {
+            settled = true;
+            log_err("alerts", incidents.settle(&store, snap.ts));
+        }
         if last_events.is_none_or(|t| t.elapsed() >= EVENTS_EVERY) {
             let boots_due = last_events.is_none() || last_boots.elapsed() >= BOOTS_EVERY;
             last_events = Some(Instant::now());
@@ -267,6 +366,7 @@ fn agent() -> Result<()> {
             last_prune = Instant::now();
             log_err("incident prune", store.prune_incidents(snap.ts));
             log_err("event prune", store.prune_events(snap.ts));
+            log_err("alert prune", store.prune_alerts(snap.ts).map(|_| ()));
         }
         last_snapshot = Some(snap);
     }

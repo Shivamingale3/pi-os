@@ -120,23 +120,80 @@ fn save(out: &Path, w: &Web) -> Result<()> {
     Ok(())
 }
 
+/// Phone alerts are looked at this often (the web checks stay once a minute).
+const ALERTS_EVERY: Duration = Duration::from_secs(15);
+/// After a failed send, wait this long at most before trying again (doubling from 15 s).
+const ALERTS_BACKOFF_MAX: Duration = Duration::from_secs(300);
+
+fn env_path(name: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(name)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
 pub fn run() -> Result<()> {
     signals::install();
     let (cfg_path, out) = (checks::path(), checks::web_out());
     eprintln!(
-        "pios web: checking {} every {} s → {}",
+        "pios web: checking {} every {} s → {}; phone alerts every {} s",
         cfg_path.display(),
         EVERY.as_secs(),
-        out.display()
+        out.display(),
+        ALERTS_EVERY.as_secs()
+    );
+    // the bot token: a systemd credential (CREDENTIALS_DIRECTORY), or PIOS_TELEGRAM (tests)
+    let cred_path = env_path("CREDENTIALS_DIRECTORY")
+        .map(|d| d.join("telegram"))
+        .or_else(|| env_path("PIOS_TELEGRAM"));
+    let agent = env_path("PIOS_SOCKET").unwrap_or_else(|| "/run/pios/pios.sock".into());
+    let status_path = out.with_file_name("alerts.json");
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|h| h.trim().to_string())
+        .unwrap_or_else(|_| "pi".into());
+    let mut state = crate::telegram::State::load(
+        env_path("STATE_DIRECTORY").or_else(|| env_path("PIOS_WEB_STATE")),
     );
     let mut prev: Option<Web> = None;
-    let mut next = Instant::now();
+    let mut next_web = Instant::now();
+    let mut next_alerts = Instant::now();
+    let mut backoff = ALERTS_EVERY;
+    let mut last_status: Option<crate::alerts::Status> = None;
     while !signals::stopping() {
-        signals::sleep_until(next);
+        signals::sleep_until(next_web.min(next_alerts));
         if signals::stopping() {
             break;
         }
-        next += EVERY;
+        let now = Instant::now();
+        if now >= next_alerts {
+            // the token is read each round: setting it up needs no restart
+            let cred = cred_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|t| crate::telegram::parse_credential(&t));
+            let mut st = crate::telegram::round(cred.as_ref(), &mut state, &agent, &host, now_ms());
+            if let Some(prev) = &last_status {
+                st.last_sent = st.last_sent.or(prev.last_sent);
+            }
+            backoff = if st.error.is_some() && st.chat {
+                (backoff * 2).min(ALERTS_BACKOFF_MAX)
+            } else {
+                ALERTS_EVERY
+            };
+            if last_status.as_ref().map(|p| &p.error) != Some(&st.error)
+                && let Some(e) = &st.error
+            {
+                eprintln!("pios web: alerts: {e}");
+            }
+            if let Ok(j) = serde_json::to_vec(&st) {
+                let _ = std::fs::write(&status_path, j);
+            }
+            last_status = Some(st);
+            next_alerts = now + backoff;
+        }
+        if now < next_web {
+            continue;
+        }
+        next_web += EVERY;
         let cfg = checks::load(&cfg_path);
         if cfg.web.is_empty() {
             prev = None;

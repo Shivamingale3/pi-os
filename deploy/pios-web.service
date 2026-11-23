@@ -1,5 +1,6 @@
-# PiOS web checks: fetches the public hostnames in /etc/pios/checks every 60 s (one curl
-# --parallel) and writes the results to /run/pios-web/web.json for the agent.
+# PiOS web checks and phone alerts: fetches the public hostnames in /etc/pios/checks every 60 s
+# (one curl --parallel, results in /run/pios-web/web.json for the agent), and every 15 s sends
+# the agent's due alerts to Telegram (the bot token: /etc/pios/telegram, as a credential).
 # Installed by `pios setup`. The only PiOS process with network access: its own throwaway user
 # (DynamicUser), read-only system, no privileges, capped.
 [Unit]
@@ -13,6 +14,13 @@ DynamicUser=yes
 ExecStart=/usr/local/bin/pios web
 Environment=PIOS_CHECKS=/etc/pios/checks
 Environment=PIOS_WEB_OUT=/run/pios-web/web.json
+# the agent's API (what alerts are due): group pios opens its socket
+Environment=PIOS_SOCKET=/run/pios/pios.sock
+SupplementaryGroups=pios
+# the bot token, handed over by systemd (this throwaway user can't read /etc/pios/telegram itself)
+LoadCredential=telegram:/etc/pios/telegram
+# the alerts' cursor and the learned chat ID
+StateDirectory=pios-web
 Restart=on-failure
 RestartSec=10
 

@@ -77,6 +77,10 @@ pub enum Nav {
     Night,
     /// one setting changed on the Display or Night screen
     Pref(super::prefs::Change),
+    Alerts,
+    AlertTypes,
+    /// queue a test alert
+    AlertTest,
     Incident(i64),
     /// a container, by `services::key` of its ID
     Container(u64),

@@ -39,6 +39,7 @@ curl --unix-socket data/pios.sock http://pios/now
 | `GET /trend?metric=NAME` | last 24 h: `{"metric", "windowMs", "points": [[ts, value], …]}` |
 | `GET /incidents` | the last 7 days, newest first, without snapshots |
 | `GET /incidents/ID` | one incident with `snapshots.start`, `.peak` and `.end` |
+| `GET /alerts?after=ID` · `GET /alerts/status` · `POST /alerts/prefs?…` · `POST /alerts/test` | the phone-alert outbox for `pios web` (settings applied), whether sending works, the screen's Alerts settings, a test message |
 | `GET /events` | last 7 days of SSH logins (and failures), sudo commands, Jenkins deploys and boots, newest first; repeated logins merged (×N) |
 | `GET /details/TILE` | `cpu`, `temps`, `memory`, `disk` or `services`, collected on request (only while that screen is open) |
 | `POST /containers/ID/restart` | the screen's one action: restarts (or starts) a container from the latest snapshot, at most once a minute each; answers 202 at once, progress shows in `/details/services` |
@@ -80,6 +81,24 @@ web cloud.example.com/status.php   # a path: an app's own health page
   process with network access, under its own throwaway user (`DynamicUser`); it writes
   `/run/pios-web/web.json`, which the agent reads (results older than 3 minutes are ignored).
   The agent itself stays on unix sockets only.
+
+## Phone alerts (Telegram)
+
+The agent decides *what* to send; `pios web`, the only PiOS process with network, sends it.
+
+- **What**: problems (an incident opens, turns critical, recovers), failed SSH logins, deploys and
+  reboots, and optionally every SSH login and sudo command. Switches in **Settings → Alerts**;
+  *Quiet at night* holds back everything but red problems (and their recovery) inside the Night
+  window. A burst becomes one message (it waits up to 10 s for more, at most a minute).
+- **How**: the agent queues alerts in SQLite (kept 7 days) and applies the screen's settings;
+  `pios web` asks `GET /alerts?after=ID` every 15 s and sends them with one `curl`, retrying with
+  backoff (up to 5 min) until Telegram accepts. A restart (a deploy) doesn't re-send a problem
+  that's still the same one, and a problem that cleared meanwhile gets its "✅ Recovered".
+- **Setup**: create a bot with @BotFather, put its token on line 1 of `/etc/pios/telegram`
+  (`pios setup` creates it empty, root-only), and send the bot any message once: `pios web`
+  learns the chat from it (or put the chat ID on line 2). Settings → Alerts → *Send test message*.
+  The token reaches `pios web` as a systemd credential and goes to curl on its stdin, never on a
+  command line or in a log.
 
 ## Screen (in progress)
 

@@ -57,7 +57,13 @@ pub struct Prefs {
     pub night_start: u32,
     pub night_end: u32,
     pub night_ring: NightRing,
+    /// phone alerts: problems (and recovery), quiet at night, failed SSH, deploys and boots,
+    /// SSH logins, sudo (the agent applies them; Settings → Alerts)
+    pub alerts: [bool; 6],
 }
+
+/// Names of `Prefs::alerts`, in order.
+pub const ALERT_KEYS: [&str; 6] = ["problems", "quiet", "failed_ssh", "deploys", "ssh", "sudo"];
 
 impl Default for Prefs {
     fn default() -> Self {
@@ -70,6 +76,7 @@ impl Default for Prefs {
             night_end: 7 * 60,
             // the ring looks the same day and night unless asked otherwise
             night_ring: NightRing::AsDay,
+            alerts: [true, true, true, true, false, false],
         }
     }
 }
@@ -84,6 +91,8 @@ pub enum Change {
     NightStart(i8),
     NightEnd(i8),
     NightRing(u8),
+    /// one of ALERT_KEYS on or off
+    Alert(u8, bool),
 }
 
 fn step(i: usize, d: i8, len: usize) -> usize {
@@ -123,6 +132,11 @@ impl Prefs {
             Change::NightEnd(d) => self.night_end = step_time(self.night_end, d),
             Change::NightRing(i) => {
                 self.night_ring = NightRing::ALL[(i as usize).min(NightRing::ALL.len() - 1)]
+            }
+            Change::Alert(i, on) => {
+                if let Some(a) = self.alerts.get_mut(i as usize) {
+                    *a = on;
+                }
             }
         }
     }
@@ -167,17 +181,39 @@ impl Prefs {
         }
     }
 
+    /// The agent's form of the alert settings (`POST /alerts/prefs`).
+    pub fn alert_query(&self) -> String {
+        let a = self.alerts;
+        crate::alerts::Prefs {
+            problems: a[0],
+            quiet: a[1],
+            failed_ssh: a[2],
+            deploys: a[3],
+            ssh: a[4],
+            sudo: a[5],
+            night_start: if self.night { self.night_start } else { 0 },
+            night_end: if self.night { self.night_end } else { 0 },
+        }
+        .to_query()
+    }
+
     pub fn to_text(self) -> String {
-        format!(
-            "off_after={}\nnight_after={}\nclock={}\nnight={}\nnight_start={}\nnight_end={}\nnight_ring={}\n",
-            self.off_after,
-            self.night_after,
-            if self.clock24 { "24" } else { "12" },
-            if self.night { "on" } else { "off" },
-            self.night_start,
-            self.night_end,
-            self.night_ring.key()
-        )
+        let alerts: String = ALERT_KEYS
+            .iter()
+            .zip(self.alerts)
+            .map(|(k, on)| format!("alert_{k}={}\n", if on { "on" } else { "off" }))
+            .collect();
+        alerts
+            + &format!(
+                "off_after={}\nnight_after={}\nclock={}\nnight={}\nnight_start={}\nnight_end={}\nnight_ring={}\n",
+                self.off_after,
+                self.night_after,
+                if self.clock24 { "24" } else { "12" },
+                if self.night { "on" } else { "off" },
+                self.night_start,
+                self.night_end,
+                self.night_ring.key()
+            )
     }
 
     pub fn parse(text: &str) -> Prefs {
@@ -199,6 +235,14 @@ impl Prefs {
                 ("night", _) if v == "on" || v == "off" => p.night = v == "on",
                 ("night_start", Some(m)) if m < 24 * 60 && m % 30 == 0 => p.night_start = m,
                 ("night_end", Some(m)) if m < 24 * 60 && m % 30 == 0 => p.night_end = m,
+                (k, _) if k.starts_with("alert_") && (v == "on" || v == "off") => {
+                    if let Some(i) = ALERT_KEYS
+                        .iter()
+                        .position(|a| Some(*a) == k.strip_prefix("alert_"))
+                    {
+                        p.alerts[i] = v == "on";
+                    }
+                }
                 ("night_ring", _) => {
                     if let Some(r) = NightRing::ALL.into_iter().find(|r| r.key() == v) {
                         p.night_ring = r;
@@ -275,6 +319,7 @@ mod tests {
             night_start: 22 * 60 + 30,
             night_end: 6 * 60,
             night_ring: NightRing::AsDay,
+            alerts: [false, true, false, true, true, false],
         };
         assert_eq!(Prefs::parse(&p.to_text()), p);
         let bad = Prefs::parse("off_after=99\nnight_start=61\nclock=13\nnight=maybe\n");

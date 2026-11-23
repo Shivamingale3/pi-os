@@ -25,6 +25,14 @@ CREATE TABLE IF NOT EXISTS events (
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events (ts);
 
+CREATE TABLE IF NOT EXISTS alerts (
+    id       INTEGER PRIMARY KEY,
+    ts       INTEGER NOT NULL,
+    kind     TEXT    NOT NULL,
+    severity TEXT    NOT NULL,
+    text     TEXT    NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS kv (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -186,16 +194,36 @@ impl Store {
     }
 
     /// Folds the WAL back into the main file (on shutdown), so a stopped agent leaves one file.
-    /// Adds events (duplicates ignored); returns how many were new.
-    pub fn insert_events(&self, list: &[crate::events::Event]) -> Result<usize> {
-        let mut n = 0;
+    /// Adds events (duplicates ignored); returns the ones that were new.
+    pub fn insert_events(
+        &self,
+        list: &[crate::events::Event],
+    ) -> Result<Vec<crate::events::Event>> {
+        let mut new = Vec::new();
         let mut st = self.conn.prepare_cached(
             "INSERT OR IGNORE INTO events (ts, kind, user, src, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
         for e in list {
-            n += st.execute(rusqlite::params![e.ts, e.kind, e.user, e.from, e.detail])?;
+            if st.execute(rusqlite::params![e.ts, e.kind, e.user, e.from, e.detail])? > 0 {
+                new.push(e.clone());
+            }
         }
-        Ok(n)
+        Ok(new)
+    }
+
+    /// Queues one phone alert (the outbox pios web reads).
+    pub fn insert_alert(&self, ts: i64, kind: &str, severity: &str, text: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO alerts (ts, kind, severity, text) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![ts, kind, severity, text],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn prune_alerts(&self, now: i64) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM alerts WHERE ts < ?1", [now - INCIDENT_KEEP_MS])?)
     }
 
     pub fn prune_events(&self, now: i64) -> Result<usize> {
@@ -293,6 +321,28 @@ fn summary(r: &rusqlite::Row) -> rusqlite::Result<Value> {
 }
 
 /// Newest first, without snapshots.
+/// Outbox rows after `after` (oldest first, at most 200), and the newest id.
+pub fn alerts_after(conn: &Connection, after: i64) -> Result<Vec<crate::alerts::Alert>> {
+    let mut st = conn.prepare_cached(
+        "SELECT id, ts, kind, severity, text FROM alerts WHERE id > ?1 ORDER BY id LIMIT 200",
+    )?;
+    let rows = st.query_map([after], |r| {
+        Ok(crate::alerts::Alert {
+            id: r.get(0)?,
+            ts: r.get(1)?,
+            kind: r.get(2)?,
+            severity: r.get(3)?,
+            text: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn kv(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+        .ok()
+}
+
 /// The last 7 days of events, newest first, repeats merged.
 pub fn list_events(conn: &Connection, since: i64) -> Result<Vec<crate::events::Event>> {
     let mut st = conn.prepare_cached(

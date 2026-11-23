@@ -6,6 +6,8 @@
 //!   GET /incidents            last 7 days, newest first, without snapshots
 //!   GET /incidents/ID         one incident with its start / peak / end snapshots
 //!   GET /events               last 7 days of SSH logins, sudo, deploys, boots (newest first)
+//!   GET /alerts?after=ID      phone alerts to send (pios web); GET /alerts/status: is it working
+//!   POST /alerts/prefs?… · POST /alerts/test   the screen's Alerts settings and test button
 //!   GET /details/TILE         cpu · temps · memory · disk · services, collected on request (screen open)
 //!   POST /containers/ID/restart   the screen's one action (202 at once; progress in /details/services)
 //!
@@ -65,7 +67,7 @@ pub fn serve(listener: UnixListener, live: Live, db_path: PathBuf) {
                 .map_err(|e| eprintln!("pios: api: {e}"))
                 .ok();
         }
-        if let Err(e) = handle(&mut stream, &live, db.as_ref())
+        if let Err(e) = handle(&mut stream, &live, db.as_ref(), &db_path)
             && !http::is_client_gone(&e)
         {
             eprintln!("pios: api: {e}");
@@ -73,17 +75,57 @@ pub fn serve(listener: UnixListener, live: Live, db_path: PathBuf) {
     }
 }
 
-fn handle(stream: &mut UnixStream, live: &Live, db: Option<&Connection>) -> std::io::Result<()> {
+fn handle(
+    stream: &mut UnixStream,
+    live: &Live,
+    db: Option<&Connection>,
+    db_path: &Path,
+) -> std::io::Result<()> {
     let Some(req) = http::read_request(stream)? else {
         return Ok(());
     };
     let (status, body) = match req {
         http::Request::TooLarge => (431, json!({"error": "request too large"})),
         http::Request::Line { method, target } if method == "GET" => route(&target, live, db),
-        http::Request::Line { method, target } if method == "POST" => action(&target, live),
+        http::Request::Line { method, target } if method == "POST" => {
+            if target.starts_with("/alerts/") {
+                alert_action(&target, db_path)
+            } else {
+                action(&target, live)
+            }
+        }
         http::Request::Line { .. } => (405, json!({"error": "only GET, or POST to restart"})),
     };
     http::respond(stream, status, &body.to_string())
+}
+
+/// POST /alerts/prefs?… (the screen's Alerts settings) · POST /alerts/test (its test button).
+/// Rare writes: a short-lived writer connection (the API thread otherwise only reads).
+pub fn alert_action(target: &str, db_path: &Path) -> (u16, Value) {
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let store = match store::Store::open(db_path) {
+        Ok(s) => s,
+        Err(e) => return (503, json!({"error": e.to_string()})),
+    };
+    let r = match path {
+        "/alerts/prefs" => {
+            let p = crate::alerts::Prefs::from_query(query);
+            store
+                .set_kv("alert_prefs", &p.to_query())
+                .map(|_| json!({"status": "saved"}))
+        }
+        "/alerts/test" => store
+            .insert_alert(
+                now_ms(),
+                crate::alerts::TEST,
+                "",
+                "🔔 Test from PiOS: alerts work",
+            )
+            .map(|id| json!({"status": "queued", "id": id})),
+        _ => return (404, json!({"error": "POST /alerts/prefs or /alerts/test"})),
+    };
+    r.map(|v| (200, v))
+        .unwrap_or_else(|e| (500, json!({"error": e.to_string()})))
 }
 
 /// The one action: POST /containers/ID/restart (from the screen's 2 s hold).
@@ -181,6 +223,36 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
             .map(|list| (200, json!({"incidents": list}))),
         "/events" => store::list_events(db, now_ms() - INCIDENT_KEEP_MS)
             .map(|list| (200, json!({"events": list}))),
+        // pios web: what to send after its cursor (the settings already applied), and the
+        // newest id it has seen (filtered-out alerts move the cursor too)
+        "/alerts" => {
+            let after = query_param(query, "after")
+                .and_then(|v| v.parse::<i64>().ok())
+                .unwrap_or(-1);
+            let prefs = store::kv(db, "alert_prefs")
+                .map(|q| crate::alerts::Prefs::from_query(&q))
+                .unwrap_or_default();
+            store::alerts_after(db, after.max(0)).map(|list| {
+                let last = list.last().map_or(after.max(0), |a| a.id);
+                // the first ask (after=-1) only learns where "now" is: no flood of old alerts
+                let send: Vec<_> = if after < 0 {
+                    vec![]
+                } else {
+                    list.into_iter()
+                        .filter(|a| prefs.wants(a, crate::alerts::local_minutes(a.ts)))
+                        .collect()
+                };
+                (200, json!({"alerts": send, "last": last}))
+            })
+        }
+        // the screen: is sending set up and working? (pios web's status file)
+        "/alerts/status" => {
+            let v = std::fs::read_to_string(crate::alerts::STATUS_PATH)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                .unwrap_or(json!({"configured": false}));
+            Ok((200, v))
+        }
         _ => match path.strip_prefix("/incidents/").map(str::parse::<i64>) {
             Some(Ok(id)) => store::get_incident(db, id).map(|found| match found {
                 Some(v) => (200, v),
@@ -231,6 +303,57 @@ mod tests {
         assert_eq!(
             route("/incidents", &l, Some(st.conn())).1["incidents"],
             json!([])
+        );
+    }
+
+    #[test]
+    fn alerts_outbox() {
+        use crate::alerts::{BOOT, PROBLEM, SSH, TEST};
+        let st = Store::memory().unwrap();
+        let l = live(None);
+        let noon = {
+            // a timestamp at local noon today, so quiet hours don't apply
+            let t = now_ms();
+            t - (crate::alerts::local_minutes(t) as i64 - 12 * 60) * 60_000
+        };
+        st.insert_alert(noon, PROBLEM, "warn", "🟠 CPU over 80%")
+            .unwrap();
+        st.insert_alert(noon, SSH, "", "🔑 SSH: admin").unwrap();
+        st.insert_alert(noon, BOOT, "", "🔄 booted").unwrap();
+        // the first ask only learns where "now" is
+        let (code, v) = route("/alerts?after=-1", &l, Some(st.conn()));
+        assert_eq!(code, 200);
+        assert_eq!(v["alerts"], json!([]));
+        assert_eq!(v["last"], 3);
+        // then: the default settings let problems and boots through, not SSH logins
+        let v = route("/alerts?after=0", &l, Some(st.conn())).1;
+        let kinds: Vec<&str> = v["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["problem", "boot"]);
+        assert_eq!(v["last"], 3, "the cursor moves past filtered ones too");
+        // settings from the screen: SSH on, problems off
+        st.set_kv("alert_prefs", "problems=0&ssh=1&deploys=1&quiet=0")
+            .unwrap();
+        let v = route("/alerts?after=0", &l, Some(st.conn())).1;
+        let kinds: Vec<&str> = v["alerts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["ssh", "boot"]);
+        st.insert_alert(noon, TEST, "", "🔔 test").unwrap();
+        assert_eq!(
+            route("/alerts?after=3", &l, Some(st.conn())).1["alerts"][0]["kind"],
+            "test"
+        );
+        assert_eq!(
+            route("/alerts/status", &l, Some(st.conn())).1["configured"],
+            json!(false)
         );
     }
 }
