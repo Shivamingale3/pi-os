@@ -165,7 +165,7 @@ binary and are installed by `pios setup`.
 
 | Unit | Runs as | What |
 |---|---|---|
-| `pios-agent.service` | `pios` (no shell, no Docker group; in `systemd-journal` to read the journal) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
+| `pios-agent.service` | `pios` (no shell, no Docker group; in `systemd-journal` to read the journal) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryHigh=24M` (trims the journal's page cache early), `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
 | `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
 | `pios-web.service` | throwaway (`DynamicUser`) | the website checks: one `curl --parallel` a minute, results in `/run/pios-web/`. The only unit with network access. `MemoryMax=48M`, `CPUQuota=10%`, read-only system |
 | `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it); the LED ring (its PWM channel is opened to `pios-ui` at start, dark again at stop). `Conflicts=tft-btop.service case-ring-breathe.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
