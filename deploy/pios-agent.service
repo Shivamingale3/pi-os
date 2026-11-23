@@ -28,6 +28,9 @@ UMask=0007
 Nice=10
 IOSchedulingClass=idle
 CPUQuota=15%
+# soft limit: reading the journal (Events tab) fills the page cache, which counts here; above
+# 24 MB the kernel trims that cache early and gently, so the 80 MB hard cap is never reached
+MemoryHigh=24M
 MemoryMax=80M
 TasksMax=16
 

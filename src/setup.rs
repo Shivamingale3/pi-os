@@ -312,6 +312,7 @@ mod tests {
             "SupplementaryGroups=systemd-journal",
             "NoNewPrivileges=yes",
             "ProtectSystem=strict",
+            "MemoryHigh=24M",
             "MemoryMax=80M",
             "CPUQuota=15%",
             "RestrictAddressFamilies=AF_UNIX",
