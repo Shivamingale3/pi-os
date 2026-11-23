@@ -3213,6 +3213,112 @@ pub fn night_face(f: &Fonts, status: Status, line: &str, time: &str) -> Tree {
     b.t
 }
 
+/// The boot screen: right after the Pi starts, until the system and the agent are up.
+pub fn boot(
+    f: &Fonts,
+    up_secs: u64,
+    system_ready: bool,
+    agent_ready: bool,
+    containers: usize,
+) -> Tree {
+    let mut b = B::new(f);
+    let area = Rect::new(M, M, WIDTH, theme::H - 2.0 * M);
+    let root = b.t.add(None, "boot", area, Paint::None);
+    let ts = Style::new(Face::SemiBold, 32.0).spacing(-0.4);
+    b.text(
+        root,
+        "title",
+        Rect::new(M, 36.0, WIDTH, 40.0),
+        "Starting up",
+        ts,
+        INK,
+    );
+    b.text(
+        root,
+        "sub",
+        Rect::new(M, 84.0, WIDTH, 18.0),
+        &format!(
+            "Booted {} ago · Home appears when everything is up",
+            duration(up_secs as i64 * 1000)
+        ),
+        body(),
+        INK2,
+    );
+    let done = [system_ready, agent_ready, agent_ready || containers > 0]
+        .iter()
+        .filter(|d| **d)
+        .count();
+    b.t.add(
+        Some(root),
+        "progress",
+        Rect::new(M, 116.0, WIDTH, 8.0),
+        Paint::Bar {
+            pct: done as f32 / 3.0,
+            track: theme::TRACK,
+            fill: INK,
+        },
+    );
+    let running = if containers == 0 {
+        "none yet".to_string()
+    } else {
+        format!("{containers} running")
+    };
+    let steps = [
+        (
+            "System",
+            if system_ready { "ready" } else { "starting" }.to_string(),
+            !system_ready,
+            system_ready,
+        ),
+        (
+            "PiOS agent",
+            if agent_ready { "ready" } else { "waiting" }.to_string(),
+            system_ready && !agent_ready,
+            agent_ready,
+        ),
+        ("Containers", running, false, containers > 0),
+    ];
+    let mut y = 144.0;
+    for (name, state, active, ready) in steps {
+        let row =
+            b.t.add(Some(root), name, Rect::new(M, y, WIDTH, 22.0), Paint::None);
+        let st = Style::new(
+            if active {
+                Face::SemiBold
+            } else {
+                Face::Regular
+            },
+            14.0,
+        );
+        let c = if active {
+            INK
+        } else if ready {
+            INK2
+        } else {
+            INK3
+        };
+        let vw = 120.0;
+        b.text(
+            row,
+            "name",
+            Rect::new(M, y, WIDTH - vw - GAP, 22.0),
+            name,
+            st,
+            c,
+        );
+        b.text_right(
+            row,
+            "state",
+            Rect::new(M + WIDTH - vw, y, vw, 22.0),
+            &state,
+            mono(),
+            c,
+        );
+        y += 22.0 + GAP;
+    }
+    b.t
+}
+
 /// The shutdown screen: what's happening and how far along (containers stopping).
 pub fn shutdown(f: &Fonts, reboot: bool, started: &str, left: usize, total: usize) -> Tree {
     let mut b = B::new(f);

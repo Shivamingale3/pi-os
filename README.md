@@ -116,6 +116,11 @@ backlight can only be on or off, so the night face is dark pixels, and the scree
 after the Display timeout. At night the ring keeps its patterns by default; *Faint* tops them at
 about 40 %, *Off* darkens it while all is good (problems still show).
 
+**Boot screen**: in the first 5 minutes after the Pi boots, until systemd has finished starting
+and the agent answers, the screen shows *Starting up*: how long ago it booted, the system, the
+agent, and how many containers are running so far; then Home. (Later, a silent agent shows as
+*Waiting for data* on Home: that's a fault, not a boot.)
+
 **Shutdown screen**: when systemd stops the screen because the whole system is going down
 (`systemctl is-system-running` = stopping), it shows *Shutting down* or *Restarting*, then the
 containers stopping one by one (their cgroups), for up to 45 s; the ring fades with them and goes
