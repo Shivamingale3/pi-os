@@ -171,6 +171,10 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     let mut pressed: Option<(usize, Instant, Option<Nav>)> = None;
     let mut holding: Option<Holding> = None;
     let mut shown: Option<(Tree, Option<usize>)> = None;
+    // right after the Pi boots: the boot screen until the system and the agent are up
+    let mut booting = uptime_secs() < BOOT_WINDOW;
+    let mut system_ready = !booting;
+    let mut boot_checked: Option<Instant> = None;
 
     while !signals::stopping() {
         let now = Instant::now();
@@ -181,8 +185,23 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
             dark_fetch = Some(now);
         }
 
+        if booting {
+            if boot_checked.is_none_or(|t| now - t >= Duration::from_secs(1)) {
+                boot_checked = Some(now);
+                system_ready = system_started();
+            }
+            if (system_ready && app.home.snapshot.is_some()) || uptime_secs() >= BOOT_WINDOW {
+                booting = false;
+                fb.invalidate();
+                shown = None;
+            }
+        }
+
         for ev in touch.as_mut().map(|t| t.read()).unwrap_or_default() {
             last_touch = now;
+            if booting {
+                continue; // nothing to tap on the boot screen
+            }
             if dark {
                 if let Event::Down(..) = ev {
                     dark = false;
@@ -281,7 +300,17 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
         }
 
         if !dark {
-            let tree = current_tree(&app, fonts);
+            let tree = if booting {
+                super::screens::boot(
+                    fonts,
+                    uptime_secs(),
+                    system_ready,
+                    app.home.snapshot.is_some(),
+                    running_containers(),
+                )
+            } else {
+                current_tree(&app, fonts)
+            };
             let p = pressed.map(|(i, _, _)| i);
             if shown.as_ref().is_none_or(|(t, sp)| *t != tree || *sp != p) {
                 let c = frame(&tree, fonts, p);
@@ -343,6 +372,28 @@ pub fn run(o: Options, fonts: &Fonts) -> Result<()> {
     eprintln!("pios ui: stopping");
     light.set(true);
     Ok(())
+}
+
+/// The boot screen shows only this soon after boot (later, a silent agent is a fault, not a boot).
+const BOOT_WINDOW: u64 = 300;
+
+fn uptime_secs() -> u64 {
+    std::fs::read_to_string("/proc/uptime")
+        .ok()
+        .and_then(|s| s.split('.').next()?.trim().parse().ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// systemd has finished starting (running, or degraded with a failed unit).
+fn system_started() -> bool {
+    std::process::Command::new("systemctl")
+        .arg("is-system-running")
+        .output()
+        .map(|o| {
+            let s = String::from_utf8_lossy(&o.stdout);
+            !matches!(s.trim(), "initializing" | "starting" | "")
+        })
+        .unwrap_or(true)
 }
 
 /// How long the shutdown screen waits for containers (the unit allows 60 s to stop).

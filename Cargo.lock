@@ -450,7 +450,7 @@ checksum = "c938015719552d665fd0553b90d96cd7ff58e83e4c061ca99e6bb78865a72752"
 
 [[package]]
 name = "pios"
-version = "0.10.3"
+version = "0.11.0"
 dependencies = [
  "ab_glyph",
  "libc",

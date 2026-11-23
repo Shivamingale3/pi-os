@@ -1221,6 +1221,26 @@ mod tests {
                 assert_eq!(tr.items[i].nav, Some(Nav::Home));
             }
         }
+        // boot: every step, long uptimes
+        for (up, sys, agent, n) in [
+            (3, false, false, 0),
+            (40, true, false, 4),
+            (299, true, true, 999),
+        ] {
+            let t = crate::ui::screens::boot(&f, up, sys, agent, n);
+            let v = layout::check(&t);
+            assert!(v.is_empty(), "boot {up}: {v:#?}");
+            assert!(
+                !t.items.iter().any(|i| i.touch),
+                "nothing to tap while booting"
+            );
+        }
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            crate::ui::panel::frame(&crate::ui::screens::boot(&f, 42, true, false, 4), &f, None)
+                .pm
+                .save_png(golden("boot.png"))
+                .unwrap();
+        }
         // shutdown: every step
         for (reboot, left, total) in [
             (false, 9, 9),
