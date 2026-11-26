@@ -86,6 +86,12 @@ pub enum Nav {
     Container(u64),
     /// restart that container (a hold target: fires after a 2 s hold, never on a tap)
     Restart(u64),
+    /// Fans screen, fan 0 (case) or 1 (Active Cooler): back to auto
+    FanAuto(u8),
+    /// … hold it at its current speed
+    FanManual(u8),
+    /// … one step slower (−1) or faster (+1), manual
+    FanStep(u8, i8),
     Back,
 }
 

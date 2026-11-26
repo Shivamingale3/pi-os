@@ -19,6 +19,8 @@ pub const OFF_AFTER: [Option<u32>; 8] = [
 ];
 /// "Night face after" steps, minutes without a touch.
 pub const NIGHT_AFTER: [u32; 6] = [1, 2, 5, 10, 15, 30];
+/// How long a manual fan speed lasts before fan_ctl goes back to auto: (label, seconds).
+pub const FAN_FOR: [(&str, u64); 3] = [("30 min", 1_800), ("1 hour", 3_600), ("4 hours", 14_400)];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NightRing {
@@ -60,6 +62,8 @@ pub struct Prefs {
     /// phone alerts: problems (and recovery), quiet at night, failed SSH, deploys and boots,
     /// SSH logins, sudo (the agent applies them; Settings → Alerts)
     pub alerts: [bool; 6],
+    /// index into FAN_FOR
+    pub fan_for: usize,
 }
 
 /// Names of `Prefs::alerts`, in order.
@@ -77,6 +81,7 @@ impl Default for Prefs {
             // the ring looks the same day and night unless asked otherwise
             night_ring: NightRing::AsDay,
             alerts: [true, true, true, true, false, false],
+            fan_for: 1, // 1 hour
         }
     }
 }
@@ -93,6 +98,8 @@ pub enum Change {
     NightRing(u8),
     /// one of ALERT_KEYS on or off
     Alert(u8, bool),
+    /// how long a manual fan speed lasts (index into FAN_FOR)
+    FanFor(u8),
 }
 
 fn step(i: usize, d: i8, len: usize) -> usize {
@@ -133,6 +140,7 @@ impl Prefs {
             Change::NightRing(i) => {
                 self.night_ring = NightRing::ALL[(i as usize).min(NightRing::ALL.len() - 1)]
             }
+            Change::FanFor(i) => self.fan_for = (i as usize).min(FAN_FOR.len() - 1),
             Change::Alert(i, on) => {
                 if let Some(a) = self.alerts.get_mut(i as usize) {
                     *a = on;
@@ -205,14 +213,15 @@ impl Prefs {
             .collect();
         alerts
             + &format!(
-                "off_after={}\nnight_after={}\nclock={}\nnight={}\nnight_start={}\nnight_end={}\nnight_ring={}\n",
+                "off_after={}\nnight_after={}\nclock={}\nnight={}\nnight_start={}\nnight_end={}\nnight_ring={}\nfan_for={}\n",
                 self.off_after,
                 self.night_after,
                 if self.clock24 { "24" } else { "12" },
                 if self.night { "on" } else { "off" },
                 self.night_start,
                 self.night_end,
-                self.night_ring.key()
+                self.night_ring.key(),
+                self.fan_for
             )
     }
 
@@ -231,6 +240,7 @@ impl Prefs {
                 ("night_after", Some(i)) if (i as usize) < NIGHT_AFTER.len() => {
                     p.night_after = i as usize
                 }
+                ("fan_for", Some(i)) if (i as usize) < FAN_FOR.len() => p.fan_for = i as usize,
                 ("clock", _) if v == "24" || v == "12" => p.clock24 = v == "24",
                 ("night", _) if v == "on" || v == "off" => p.night = v == "on",
                 ("night_start", Some(m)) if m < 24 * 60 && m % 30 == 0 => p.night_start = m,
@@ -320,9 +330,10 @@ mod tests {
             night_end: 6 * 60,
             night_ring: NightRing::AsDay,
             alerts: [false, true, false, true, true, false],
+            fan_for: 2,
         };
         assert_eq!(Prefs::parse(&p.to_text()), p);
-        let bad = Prefs::parse("off_after=99\nnight_start=61\nclock=13\nnight=maybe\n");
+        let bad = Prefs::parse("off_after=99\nnight_start=61\nclock=13\nnight=maybe\nfan_for=3\n");
         assert_eq!(bad, Prefs::default());
     }
 }

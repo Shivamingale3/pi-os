@@ -1,5 +1,6 @@
-//! System events for History: SSH logins (and failures), sudo commands, Jenkins deploys and boots,
-//! read from the systemd journal once a minute and kept 7 days.
+//! System events for History: SSH logins (and failures), sudo commands, Jenkins deploys, boots
+//! and manual fan changes (fan_ctl's own log lines), read from the systemd journal once a minute
+//! and kept 7 days.
 //!
 //! The agent is in the `systemd-journal` group (read-only) and runs `journalctl` for just the
 //! sshd and sudo lines after the last cursor it saw; boots come from `journalctl --list-boots`.
@@ -22,12 +23,13 @@ const FIRST_SINCE: &str = "-7d";
 pub struct Event {
     /// ms since the Unix epoch
     pub ts: i64,
-    /// ssh · ssh_failed · sudo · deploy · boot
+    /// ssh · ssh_failed · sudo · deploy · boot · fan
     pub kind: String,
     pub user: String,
     /// where from (ssh), or "" (sudo, boot)
     pub from: String,
     /// sudo: the command · deploy: the version · boot: ms the Pi was off (as text)
+    /// fan: what changed ("80 % for 1 h", "auto", "overruled: too hot"); `user` is case / cooler
     pub detail: String,
     /// merged repeats (×N); 1 when alone
     #[serde(default = "one")]
@@ -57,9 +59,75 @@ fn user_from(rest: &str) -> Option<(&str, &str)> {
     Some((user, addr))
 }
 
+/// "for 3599 s" → "for 1 h"; "until fan_ctl stops" → "until restart".
+fn fan_for(rest: &str) -> String {
+    let Some(secs) = rest
+        .strip_prefix("for ")
+        .and_then(|r| r.strip_suffix(" s"))
+        .and_then(|n| n.parse::<u64>().ok())
+    else {
+        return "until restart".into();
+    };
+    let min = (secs + 30) / 60;
+    if min >= 60 && min % 60 == 0 {
+        format!("for {} h", min / 60)
+    } else if min >= 60 {
+        format!("for {} h {} min", min / 60, min % 60)
+    } else {
+        format!("for {} min", min.max(1))
+    }
+}
+
+/// fan_ctl's mode-change lines → (which fan, what).
+fn fan_line(msg: &str) -> Option<(&'static str, String)> {
+    if let Some(rest) = msg.strip_prefix("cooler manual level ") {
+        // "cooler manual level 2/4 for 3599 s"
+        let (level, rest) = rest.split_once(' ')?;
+        let level = level.split('/').next()?;
+        let what = if level == "0" {
+            "off".to_string()
+        } else {
+            format!("level {level}")
+        };
+        return Some(("cooler", format!("{what} {}", fan_for(rest))));
+    }
+    if let Some(rest) = msg.strip_prefix("cooler manual overruled: ") {
+        let why = match rest.split_once(';') {
+            Some((cpu, _)) => cpu.replace("CPU at ", "CPU ").to_string(),
+            None => rest.to_string(),
+        };
+        return Some(("cooler", format!("overruled: {why}")));
+    }
+    if msg == "cooler back to the kernel" {
+        return Some(("cooler", "auto".into()));
+    }
+    if msg.starts_with("manual overruled:") {
+        return Some(("case", "overruled: too hot, 100 %".into()));
+    }
+    if let Some(rest) = msg.strip_prefix("manual ") {
+        // "manual 80% for 3600 s"
+        let (pct, rest) = rest.split_once(' ')?;
+        let pct: u32 = pct.strip_suffix('%')?.parse().ok()?;
+        let what = if pct == 0 {
+            "off".to_string()
+        } else {
+            format!("{pct} %")
+        };
+        return Some(("case", format!("{what} {}", fan_for(rest))));
+    }
+    if msg == "back to auto" {
+        return Some(("case", "auto".into()));
+    }
+    None
+}
+
 /// One journal line → an event, if it is one we show.
 pub fn parse(ident: &str, msg: &str, ts: i64) -> Option<Event> {
     match ident {
+        "fan_ctl" => {
+            let (which, what) = fan_line(msg)?;
+            Some(ev(ts, "fan", which, "", &what))
+        }
         "sshd" | "sshd-session" => {
             if let Some(rest) = msg.strip_prefix("Accepted ") {
                 // "Accepted publickey for admin from 1.2.3.4 port 5 ssh2: …"
@@ -148,7 +216,7 @@ pub fn parse_journal(text: &str) -> (Vec<Event>, Option<String>) {
     (out, cursor)
 }
 
-/// New sshd and sudo lines since `cursor` (or the last 7 days the first time).
+/// New sshd, sudo and fan_ctl lines since `cursor` (or the last 7 days the first time).
 pub fn read_journal(cursor: Option<&str>) -> Result<(Vec<Event>, Option<String>)> {
     let mut cmd = Command::new("journalctl");
     cmd.args([
@@ -159,6 +227,7 @@ pub fn read_journal(cursor: Option<&str>) -> Result<(Vec<Event>, Option<String>)
         "--identifier=sshd-session",
         "--identifier=sshd",
         "--identifier=sudo",
+        "--identifier=fan_ctl",
     ]);
     match cursor {
         Some(c) => cmd.arg(format!("--after-cursor={c}")),
@@ -236,6 +305,53 @@ pub fn merge(mut list: Vec<Event>) -> Vec<Event> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fan_ctl_lines() {
+        let f = |m| parse("fan_ctl", m, 1).map(|e| (e.user, e.detail));
+        let s = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(f("manual 80% for 3600 s"), s("case", "80 % for 1 h"));
+        assert_eq!(f("manual 0% for 1799 s"), s("case", "off for 30 min"));
+        assert_eq!(
+            f("manual 100% until fan_ctl stops"),
+            s("case", "100 % until restart")
+        );
+        assert_eq!(f("manual 65% for 5400 s"), s("case", "65 % for 1 h 30 min"));
+        assert_eq!(f("manual 65% for 8 s"), s("case", "65 % for 1 min"));
+        assert_eq!(f("back to auto"), s("case", "auto"));
+        assert_eq!(
+            f("manual overruled: a sensor reached full temperature; fan 100%"),
+            s("case", "overruled: too hot, 100 %")
+        );
+        assert_eq!(
+            f("cooler manual level 2/4 for 3599 s"),
+            s("cooler", "level 2 for 1 h")
+        );
+        assert_eq!(
+            f("cooler manual level 0/4 until fan_ctl stops"),
+            s("cooler", "off until restart")
+        );
+        assert_eq!(f("cooler back to the kernel"), s("cooler", "auto"));
+        assert_eq!(
+            f("cooler manual overruled: CPU at 75 °C; kernel in control"),
+            s("cooler", "overruled: CPU 75 °C")
+        );
+        assert_eq!(
+            f("cooler manual overruled: sensor error"),
+            s("cooler", "overruled: sensor error")
+        );
+        for other in [
+            "fan 60% auto (cpu 42.5 °C, nvme 51.8 °C)",
+            "driving /sys/class/pwm/pwmchip2/pwm0",
+            "fan_ctl 0.2.0 starting",
+        ] {
+            assert_eq!(f(other), None, "{other}");
+        }
+        assert_eq!(
+            parse("fan_ctl", "manual 80% for 3600 s", 7).unwrap().kind,
+            "fan"
+        );
+    }
 
     #[test]
     fn ssh_lines() {

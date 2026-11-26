@@ -118,8 +118,12 @@ lifting or sliding away cancels, and a tap does nothing. **Host** lists one row 
 (its detail shows the unit, main process and tasks; no Restart). **Web** lists each hostname with
 its response time and HTTP code, problems first, 4 per page. **Fans** (tap the fan card on Temperatures, or from the menu) shows the case fan driven by
 [fan_ctl](https://github.com/Shivamingale3/fan_ctl) (its speed from the PWM, whether fan_ctl is
-running, its curve from `/etc/fan_ctl.conf` or the defaults, and which of NVMe or CPU it follows)
-beside the Active Cooler (rpm, steps and their temperatures); read-only, PiOS never drives a fan.
+running, and which of NVMe or CPU it follows) beside the Active Cooler (rpm, level, where it starts).
+With fan_ctl ≥ 0.2 each fan has **Auto / Manual** and **− / +** (case fan Off or its floor … 100 %
+in 5 % steps, cooler level 0 … 4), and **Manual lasts** 30 min, 1 hour or 4 hours, then fan_ctl goes
+back to auto. PiOS only asks: the helper writes fan_ctl's override file, and fan_ctl keeps its own
+safety rules (too hot or a sensor fault: case fan 100 %, cooler back to the kernel). Manual changes
+show in History → Events.
 The **menu** button on Home opens Settings: the **LED ring** screen chooses the pattern for each
 state (all good: breathe · steady · off; attention: pulse · blink · steady; down: blink · pulse ·
 steady) and its brightness; a tap saves it and plays it on the ring for 6 s.
