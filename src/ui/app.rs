@@ -104,6 +104,60 @@ pub const SCREENS: [&str; 20] = [
 /// The refresh icon spins at least this long, so a fast fetch is still seen to happen.
 pub const REFRESH_SHOWN: Duration = Duration::from_millis(800);
 
+/// − / + taps are sent once they stop for this long (one change instead of five).
+pub const FAN_DEBOUNCE: Duration = Duration::from_millis(700);
+/// A sent change is shown until fan_ctl reports it, or for at most this long.
+const FAN_SHOWN: Duration = Duration::from_secs(6);
+
+/// A fan change made on the screen, not yet confirmed by fan_ctl's status.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FanPending {
+    /// the manual value wanted, or None for auto
+    pub want: Option<u32>,
+    pub at: Instant,
+    pub sent: bool,
+}
+
+/// The values − / + walk through: case fan Off, then its floor … 100 % in 5 % steps;
+/// Active Cooler 0 … its top level.
+pub fn fan_steps(which: u8, t: &TempDetails) -> Vec<u32> {
+    if which == 0 {
+        let floor = t.case_fan.as_ref().map_or(60, |c| {
+            (c.min_duty.clamp(0.0, 100.0) / 5.0).ceil() as u32 * 5
+        });
+        std::iter::once(0)
+            .chain((floor.max(5)..=100).step_by(5))
+            .collect()
+    } else {
+        let top = t.fan.as_ref().map_or(4, |f| f.steps.max(1));
+        (0..=top).collect()
+    }
+}
+
+/// The fan's speed now, as one of `fan_steps` (case duty rounded up to the next step).
+fn fan_now(which: u8, t: &TempDetails) -> u32 {
+    let steps = fan_steps(which, t);
+    let now = if which == 0 {
+        t.case_fan.as_ref().map_or(100.0, |c| c.duty)
+    } else {
+        t.fan.as_ref().map_or(0.0, |f| f.step as f64)
+    };
+    steps
+        .iter()
+        .copied()
+        .find(|v| *v as f64 >= now - 0.5)
+        .unwrap_or(*steps.last().unwrap_or(&0))
+}
+
+/// One fan's manual-control state (None: fan_ctl < 0.2, stopped, or no such fan).
+pub fn fan_control(which: u8, t: &TempDetails) -> Option<&crate::details::Control> {
+    if which == 0 {
+        t.case_fan.as_ref()?.control.as_ref()
+    } else {
+        t.fan.as_ref()?.control.as_ref()
+    }
+}
+
 /// Sparkline length (one point per refresh: Disk I/O, a container's CPU and memory).
 const IO_POINTS: usize = 12;
 /// 24 h graphs are drawn from this many averaged buckets (15 min each).
@@ -150,6 +204,10 @@ pub struct App {
     pub alert_test: Option<Instant>,
     /// where Fans' back button goes (Temperatures or Settings)
     fans_from: Option<Screen>,
+    /// fan changes from the Fans screen (0 case, 1 cooler), until fan_ctl reports them
+    pub fan_pending: [Option<FanPending>; 2],
+    /// the agent refused the last fan change (shown on the Fans screen)
+    pub fan_error: Option<String>,
     /// when Refresh was tapped: its icon spins for at least REFRESH_SHOWN
     pub refreshing: Option<Instant>,
     last: HashMap<&'static str, Instant>,
@@ -244,6 +302,10 @@ impl App {
             }
             // an action, not a place (see `act`)
             Nav::Restart(_) => self.screen(),
+            Nav::FanAuto(w) | Nav::FanManual(w) | Nav::FanStep(w, _) => {
+                self.fan_change(nav, (w as usize).min(1));
+                self.screen()
+            }
             // everything the open screen shows becomes due now (the caller fetches right after)
             Nav::Refresh => {
                 for (k, _) in self.needs() {
@@ -267,6 +329,9 @@ impl App {
             Nav::Display => Screen::Display,
             Nav::Night => Screen::Night,
             Nav::Pref(c) => {
+                if let super::prefs::Change::FanFor(_) = c {
+                    self.resend_manual();
+                }
                 self.prefs.apply(c);
                 self.prefs.save(self.prefs_path.as_deref());
                 super::set_clock24(self.prefs.clock24);
@@ -323,6 +388,139 @@ impl App {
         self.screen = Some(next);
     }
 
+    /// The value a fan's controls show: a change not yet confirmed, else fan_ctl's own.
+    /// Some(None) = auto, Some(Some(v)) = manual at v, None = no control.
+    pub fn fan_shown(&self, which: usize) -> Option<Option<u32>> {
+        let t = self.temps.as_ref()?;
+        let c = fan_control(which as u8, t)?;
+        if let Some(p) = self.fan_pending[which] {
+            return Some(p.want);
+        }
+        Some(c.manual)
+    }
+
+    /// − / + / Auto / Manual on the Fans screen: only remembered here; `update` sends it.
+    fn fan_change(&mut self, nav: Nav, w: usize) {
+        let Some(t) = self.temps.as_ref() else {
+            return;
+        };
+        if fan_control(w as u8, t).is_none() {
+            return;
+        }
+        let steps = fan_steps(w as u8, t);
+        let base = || {
+            self.fan_shown(w)
+                .flatten()
+                .unwrap_or_else(|| fan_now(w as u8, t))
+        };
+        let want = match nav {
+            Nav::FanAuto(_) => None,
+            Nav::FanManual(_) => Some(base()),
+            Nav::FanStep(_, d) => {
+                let b = base();
+                let i = steps
+                    .iter()
+                    .position(|v| *v >= b)
+                    .unwrap_or(steps.len() - 1) as i64;
+                let i = (i + d as i64).clamp(0, steps.len() as i64 - 1) as usize;
+                Some(steps[i])
+            }
+            _ => return,
+        };
+        let now = Instant::now();
+        self.fan_error = None;
+        self.fan_pending[w] = Some(FanPending {
+            want,
+            // Auto and Manual go at once; steps wait for the taps to stop
+            at: if matches!(nav, Nav::FanStep(..)) {
+                now
+            } else {
+                now.checked_sub(FAN_DEBOUNCE).unwrap_or(now)
+            },
+            sent: false,
+        });
+    }
+
+    /// A new "manual lasts" choice applies to a speed already held, too.
+    fn resend_manual(&mut self) {
+        let Some(t) = self.temps.as_ref() else {
+            return;
+        };
+        for (w, pending) in self.fan_pending.iter_mut().enumerate() {
+            if pending.is_none()
+                && let Some(v) = fan_control(w as u8, t).and_then(|c| c.manual)
+            {
+                let now = Instant::now();
+                *pending = Some(FanPending {
+                    want: Some(v),
+                    at: now.checked_sub(FAN_DEBOUNCE).unwrap_or(now),
+                    sent: false,
+                });
+            }
+        }
+    }
+
+    /// Sends fan changes whose taps have stopped; forgets the ones fan_ctl now reports.
+    fn send_fans(&mut self, socket: &Path, now: Instant) {
+        for w in 0..2 {
+            let Some(mut p) = self.fan_pending[w] else {
+                continue;
+            };
+            if p.sent {
+                let done = self
+                    .temps
+                    .as_ref()
+                    .and_then(|t| fan_control(w as u8, t))
+                    .is_none_or(|c| c.manual == p.want);
+                if done || now.saturating_duration_since(p.at) >= FAN_SHOWN {
+                    self.fan_pending[w] = None;
+                }
+                continue;
+            }
+            if now.saturating_duration_since(p.at) < FAN_DEBOUNCE {
+                continue;
+            }
+            let fan = if w == 0 { "case" } else { "cooler" };
+            let path = match p.want {
+                None => format!("/fans/{fan}/auto"),
+                Some(v) => format!(
+                    "/fans/{fan}?{}={v}&for={}",
+                    if w == 0 { "duty" } else { "level" },
+                    super::prefs::FAN_FOR[self.prefs.fan_for.min(2)].1
+                ),
+            };
+            if !self.live {
+                eprintln!("pios ui: fan {path} (sample: nothing sent)");
+                self.fan_pending[w] = None;
+                continue;
+            }
+            match crate::http::post(socket, &path, Duration::from_secs(4)) {
+                Ok((200, _)) => {
+                    p.sent = true;
+                    p.at = now;
+                    self.fan_pending[w] = Some(p);
+                    // fan_ctl applies it within about a second: look again soon after
+                    let soon = Duration::from_secs(5) - Duration::from_millis(1_200);
+                    self.last
+                        .insert("temps", now.checked_sub(soon).unwrap_or(now));
+                }
+                Ok((_, body)) => {
+                    self.fan_error = Some(
+                        serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .and_then(|v| v.get("error")?.as_str().map(String::from))
+                            .unwrap_or_else(|| "refused".into()),
+                    );
+                    self.fan_pending[w] = None;
+                }
+                Err(_) => {
+                    self.fan_error = Some("agent not answering".into());
+                    self.fan_pending[w] = None;
+                }
+            }
+        }
+    }
+
     fn due(&mut self, key: &'static str, every: Duration, now: Instant) -> bool {
         if self
             .last
@@ -363,6 +561,9 @@ impl App {
 
     /// Fetches what's due for the open screen. Returns true if anything was fetched.
     pub fn update(&mut self, socket: &Path, now: Instant) -> bool {
+        if self.screen() == Screen::Fans || self.fan_pending.iter().any(Option::is_some) {
+            self.send_fans(socket, now);
+        }
         if !self.live {
             return false;
         }
@@ -530,6 +731,10 @@ impl App {
 
     /// How long until the next fetch is due.
     pub fn next_due(&self, now: Instant) -> Duration {
+        let fans = self.fan_pending.iter().flatten().map(|p| {
+            let wait = if p.sent { FAN_SHOWN } else { FAN_DEBOUNCE };
+            (p.at + wait).saturating_duration_since(now)
+        });
         self.needs()
             .into_iter()
             .map(|(k, every)| {
@@ -537,6 +742,7 @@ impl App {
                     (*t + every).saturating_duration_since(now)
                 })
             })
+            .chain(fans)
             .min()
             .unwrap_or(Duration::from_secs(5))
     }
@@ -592,7 +798,16 @@ impl App {
             Screen::Services => {
                 screens::services(f, self.services.as_ref(), self.tab, self.page, at)
             }
-            Screen::Fans => screens::fans(f, self.temps.as_ref()),
+            Screen::Fans => screens::fans(
+                f,
+                self.temps.as_ref(),
+                screens::FanUi {
+                    shown: [self.fan_shown(0), self.fan_shown(1)],
+                    fan_for: self.prefs.fan_for,
+                    error: self.fan_error.as_deref(),
+                    now_s: now_ms / 1000,
+                },
+            ),
             Screen::Settings => screens::settings(f, &self.ring, &self.prefs),
             Screen::Display => screens::display_screen(f, &self.prefs),
             Screen::Night => screens::night_screen(f, &self.prefs),

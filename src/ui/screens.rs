@@ -16,7 +16,7 @@ use super::layout::{Marker, Nav, Paint, Rect, Tree};
 use super::prefs::{self, Prefs};
 use super::ring;
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
-use crate::details::{CaseFan, CpuDetails, DiskDetails, MemDetails, TempDetails};
+use crate::details::{CaseFan, Control, CpuDetails, DiskDetails, FanMode, MemDetails, TempDetails};
 use crate::events::Event;
 use crate::rules::THRESHOLDS;
 use crate::services::{Service, Services};
@@ -720,8 +720,10 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                 },
             );
             let _ = bar;
+            let held = manual_note(d);
             let cap = match (cf.controller, cooler) {
                 (false, _) => "case fan · fan_ctl stopped".to_string(),
+                _ if held.is_some() => held.clone().unwrap_or_default(),
                 (true, Some(f)) if f.step > 0 || f.rpm.unwrap_or(0) > 0 => {
                     "case fan · cooler on".into()
                 }
@@ -734,7 +736,11 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                 Rect::new(r.x, r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP, r.w, 16.0),
                 &cap,
                 small(),
-                INK3,
+                if held.is_some() {
+                    status_colors(Status::Attention).text
+                } else {
+                    INK3
+                },
             );
         }
         (None, Some(fan)) => {
@@ -759,9 +765,11 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                     off_color: theme::TRACK,
                 },
             );
-            let cap = match fan.starts_at {
-                Some(t) => format!("{} rpm · on at {t:.0} °C", fan.rpm.unwrap_or(0)),
-                None => format!("{} rpm", fan.rpm.unwrap_or(0)),
+            let held = manual_note(d);
+            let cap = match (&held, fan.starts_at) {
+                (Some(h), _) => h.clone(),
+                (None, Some(t)) => format!("{} rpm · on at {t:.0} °C", fan.rpm.unwrap_or(0)),
+                (None, None) => format!("{} rpm", fan.rpm.unwrap_or(0)),
             };
             b.text(
                 c,
@@ -769,7 +777,11 @@ pub fn temps(f: &Fonts, d: Option<&TempDetails>, trend: &[f32]) -> Tree {
                 Rect::new(r.x, r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP, r.w, 16.0),
                 &cap,
                 small(),
-                INK3,
+                if held.is_some() {
+                    status_colors(Status::Attention).text
+                } else {
+                    INK3
+                },
             );
         }
         (None, None) => {
@@ -1453,6 +1465,26 @@ fn event_text(e: &Event) -> (String, String, Marker) {
                 .map(|ms| format!("was off {}", duration(ms)))
                 .unwrap_or_default(),
             Marker::Ring(INK2),
+        ),
+        "fan" => (
+            if e.user == "cooler" {
+                "Active Cooler"
+            } else {
+                "Case fan"
+            }
+            .into(),
+            if e.detail == "auto" {
+                "back to auto".into()
+            } else if e.detail.starts_with("overruled") {
+                e.detail.clone()
+            } else {
+                format!("manual · {}", e.detail)
+            },
+            if e.detail.starts_with("overruled") {
+                Marker::Square(status_colors(Status::Attention).shape)
+            } else {
+                Marker::Ring(INK2)
+            },
         ),
         other => (other.into(), e.detail.clone(), Marker::Ring(INK3)),
     }
@@ -2596,7 +2628,200 @@ fn case_fan_reason(cf: &CaseFan, nvme: Option<f64>, cpu: Option<f64>) -> String 
     }
 }
 
-pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
+/// "manual: case fan" / "manual: cooler" / "manual: both" (Temperatures' fan card), if any.
+fn manual_note(d: &TempDetails) -> Option<String> {
+    let held =
+        |c: Option<&Control>| c.is_some_and(|c| c.mode != FanMode::Auto && c.manual.is_some());
+    let case = held(d.case_fan.as_ref().and_then(|c| c.control.as_ref()));
+    let cooler = held(d.fan.as_ref().and_then(|f| f.control.as_ref()));
+    match (case, cooler) {
+        (true, true) => Some("manual: both fans".into()),
+        (true, false) => Some("manual: case fan".into()),
+        (false, true) => Some("manual: cooler".into()),
+        _ => None,
+    }
+}
+
+/// What the Fans screen's controls show besides fan_ctl's own status.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FanUi<'a> {
+    /// per fan (case, cooler): None = no control; Some(None) = auto; Some(Some(v)) = manual v
+    pub shown: [Option<Option<u32>>; 2],
+    /// index into prefs::FAN_FOR
+    pub fan_for: usize,
+    /// the agent refused the last change
+    pub error: Option<&'a str>,
+    /// unix seconds now (for "auto in 58 min")
+    pub now_s: i64,
+}
+
+/// "auto in 58 min" / "auto in 3 h 20 min" / "until fan_ctl restarts"
+fn auto_in(until: Option<i64>, now_s: i64) -> String {
+    let Some(u) = until else {
+        return "until fan_ctl restarts".into();
+    };
+    let min = ((u - now_s).max(0) + 59) / 60;
+    match min {
+        0..=1 => "auto in 1 min".into(),
+        2..=59 => format!("auto in {min} min"),
+        _ if min % 60 == 0 => format!("auto in {} h", min / 60),
+        _ => format!("auto in {} h {} min", min / 60, min % 60),
+    }
+}
+
+/// The card's top-right word for a fan's mode.
+fn mode_word(c: Option<&Control>) -> &'static str {
+    match c.map(|c| c.mode) {
+        None => "",
+        Some(FanMode::Auto) => "AUTO",
+        Some(FanMode::Manual) => "MANUAL",
+        Some(FanMode::Safety) => "SAFETY",
+        Some(FanMode::Failsafe) => "SENSOR FAULT",
+    }
+}
+
+/// The 44 px control row at `y` in a fan card: [Auto ✓][Manual] while auto,
+/// [Auto][−] value [+] while manual, greyed and inert without fan_ctl's control.
+fn fan_controls(
+    b: &mut B,
+    card: usize,
+    r: Rect,
+    which: u8,
+    shown: Option<Option<u32>>,
+    label: &dyn Fn(u32) -> String,
+    steps: &[u32],
+) {
+    let btn = Style::new(Face::SemiBold, size::BODY.0);
+    let button = |b: &mut B, name: &str, rect: Rect, text: &str, nav: Option<Nav>, on: bool| {
+        let it = b.t.add(
+            Some(card),
+            name,
+            rect,
+            Paint::Panel {
+                fill: if on { theme::TRACK } else { theme::RAISED },
+                radius: theme::RADIUS_TILE,
+                border: on.then_some(INK2),
+            },
+        );
+        if let Some(n) = nav {
+            b.t.nav(it, n);
+        }
+        b.t.pad(it, 4.0);
+        let st = if text == "−" || text == "+" {
+            Style::new(Face::SemiBold, 20.0)
+        } else {
+            btn
+        };
+        let w = b.f.width(&st, text).min(rect.w - 8.0);
+        let color = match (nav.is_some(), on) {
+            (false, false) => theme::MUTED,
+            (_, true) => INK,
+            _ => INK2,
+        };
+        b.text(
+            it,
+            "label",
+            Rect::new(rect.x + (rect.w - w) / 2.0, rect.y + 8.0, w, 28.0),
+            text,
+            st,
+            color,
+        );
+    };
+    let half = (r.w - GAP) / 2.0;
+    match shown {
+        None => {
+            button(
+                b,
+                "auto",
+                Rect::new(r.x, r.y, half, 44.0),
+                "Auto",
+                None,
+                false,
+            );
+            let x = r.x + half + GAP;
+            button(
+                b,
+                "manual",
+                Rect::new(x, r.y, half, 44.0),
+                "Manual",
+                None,
+                false,
+            );
+        }
+        Some(None) => {
+            let auto = Some(Nav::FanAuto(which));
+            button(
+                b,
+                "auto",
+                Rect::new(r.x, r.y, half, 44.0),
+                "Auto",
+                auto,
+                true,
+            );
+            let x = r.x + half + GAP;
+            let manual = Some(Nav::FanManual(which));
+            button(
+                b,
+                "manual",
+                Rect::new(x, r.y, half, 44.0),
+                "Manual",
+                manual,
+                false,
+            );
+        }
+        Some(Some(v)) => {
+            let aw = r.w - 44.0 * 2.0 - 48.0 - GAP - 2.0 * MIN_GAP;
+            let auto = Some(Nav::FanAuto(which));
+            button(
+                b,
+                "auto",
+                Rect::new(r.x, r.y, aw, 44.0),
+                "Auto",
+                auto,
+                false,
+            );
+            let i = steps.iter().position(|s| *s >= v).unwrap_or(0);
+            let mx = r.x + aw + GAP;
+            let minus = (i > 0).then_some(Nav::FanStep(which, -1));
+            button(
+                b,
+                "minus",
+                Rect::new(mx, r.y, 44.0, 44.0),
+                "−",
+                minus,
+                false,
+            );
+            let vx = mx + 44.0 + MIN_GAP;
+            let vr = Rect::new(vx, r.y, 48.0, 44.0);
+            let it = b.t.add(
+                Some(card),
+                "manual value",
+                vr,
+                Paint::Panel {
+                    fill: theme::TRACK,
+                    radius: theme::RADIUS_TILE,
+                    border: Some(status_colors(Status::Attention).shape),
+                },
+            );
+            b.t.pad(it, 4.0);
+            let text = label(v);
+            let w = b.f.width(&btn, &text).min(vr.w - 8.0);
+            b.text(
+                it,
+                "value",
+                Rect::new(vr.x + (vr.w - w) / 2.0, vr.y + 8.0, w, 28.0),
+                &text,
+                btn,
+                INK,
+            );
+            let px = vx + 48.0 + MIN_GAP;
+            let plus = (i + 1 < steps.len()).then_some(Nav::FanStep(which, 1));
+            button(b, "plus", Rect::new(px, r.y, 44.0, 44.0), "+", plus, false);
+        }
+    }
+}
+
+pub fn fans(f: &Fonts, d: Option<&TempDetails>, ui: FanUi) -> Tree {
     let mut b = B::new(f);
     let Some(d) = d else {
         return reading(&mut b, "Fans");
@@ -2604,26 +2829,27 @@ pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
     b.header("Fans", "");
     let temp = |name: &str| d.sensors.iter().find(|s| s.name == name).map(|s| s.celsius);
     let (nvme, cpu) = (temp("NVMe"), temp("CPU"));
+    let amber = status_colors(Status::Attention);
+    let col_w = (WIDTH - GAP) / 2.0;
+    const CARD_H: f32 = 160.0;
 
     // case fan (fan_ctl)
+    let cc = d.case_fan.as_ref().and_then(|c| c.control.as_ref());
     let (c, r) = b.card(
         "case",
-        Rect::new(M, TOP, 262.0, 136.0),
+        Rect::new(M, TOP, col_w, CARD_H),
         "CASE FAN",
         match &d.case_fan {
-            Some(cf) if cf.controller => "fan_ctl · running",
-            Some(_) => "fan_ctl · stopped",
+            Some(cf) if !cf.controller => "STOPPED",
+            Some(_) => mode_word(cc),
             None => "",
         },
     );
     match &d.case_fan {
         Some(cf) => {
-            let warn = !cf.controller;
-            let tone = if warn {
-                status_colors(Status::Attention).text
-            } else {
-                INK
-            };
+            let mode = cc.map(|c| c.mode);
+            let warn = !cf.controller || matches!(mode, Some(FanMode::Safety | FanMode::Failsafe));
+            let tone = if warn { amber.text } else { INK };
             b.value(
                 c,
                 "value",
@@ -2635,58 +2861,79 @@ pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
             b.t.add(
                 Some(c),
                 "duty",
-                Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 10.0),
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 8.0),
                 Paint::Bar {
                     pct: (cf.duty / 100.0) as f32,
                     track: theme::TRACK,
-                    fill: if warn {
-                        status_colors(Status::Attention).shape
-                    } else {
-                        INK2
-                    },
+                    fill: if warn { amber.shape } else { INK2 },
                 },
             );
-            let y = r.y + 32.0 + MIN_GAP + 10.0 + MIN_GAP;
+            let reason = match (cf.controller, cc) {
+                (false, _) => "fan_ctl stopped: full speed".to_string(),
+                (true, None) => "fan_ctl 0.2 needed for manual".to_string(),
+                (true, Some(c)) => match c.mode {
+                    FanMode::Auto => case_fan_reason(cf, nvme, cpu),
+                    FanMode::Manual => format!("manual · {}", auto_in(c.until, ui.now_s)),
+                    FanMode::Safety => format!(
+                        "too hot (NVMe {:.0} / CPU {:.0} °C): 100 %",
+                        cf.nvme.1, cf.cpu.1
+                    ),
+                    FanMode::Failsafe => "sensor fault: full speed".to_string(),
+                },
+            };
+            let manual = cc.is_some_and(|c| c.mode == FanMode::Manual);
             b.text(
                 c,
                 "reason",
-                Rect::new(r.x, y, r.w, 18.0),
-                &case_fan_reason(cf, nvme, cpu),
-                body(),
-                if warn { tone } else { INK2 },
-            );
-            b.text(
-                c,
-                "curve",
-                Rect::new(r.x, y + 18.0 + MIN_GAP, r.w, 16.0),
-                &format!(
-                    "{:.0} % floor · 100 % at {:.0} / {:.0} °C",
-                    cf.min_duty, cf.nvme.1, cf.cpu.1
-                ),
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP, r.w, 16.0),
+                &reason,
                 small(),
-                INK3,
+                if warn || manual { amber.text } else { INK2 },
+            );
+            let steps = d_steps(0, d);
+            fan_controls(
+                &mut b,
+                c,
+                Rect::new(r.x, r.bottom() - 44.0, r.w, 44.0),
+                0,
+                if cf.controller { ui.shown[0] } else { None },
+                &|v| {
+                    if v == 0 {
+                        "Off".into()
+                    } else {
+                        format!("{v} %")
+                    }
+                },
+                &steps,
             );
         }
         None => b.note(c, r, "No case fan (fan_ctl) found"),
     }
 
     // Active Cooler
+    let fc = d.fan.as_ref().and_then(|f| f.control.as_ref());
     let (c, r) = b.card(
         "cooler",
-        Rect::new(M + 262.0 + GAP, TOP, WIDTH - 262.0 - GAP, 136.0),
+        Rect::new(M + col_w + GAP, TOP, col_w, CARD_H),
         "ACTIVE COOLER",
-        "",
+        mode_word(fc),
     );
     match &d.fan {
         Some(fan) => {
-            let on = fan.step > 0 || fan.rpm.unwrap_or(0) > 0;
+            let mode = fc.map(|c| c.mode);
+            let warn = matches!(mode, Some(FanMode::Safety | FanMode::Failsafe));
+            let (v, unit) = match fan.rpm {
+                Some(rpm) => (group(rpm as u64), "rpm"),
+                None if fan.step > 0 => ("On".into(), ""),
+                None => ("Off".into(), ""),
+            };
             b.value(
                 c,
                 "value",
                 Rect::new(r.x, r.y, r.w, 32.0),
-                if on { "On" } else { "Off" },
-                "",
-                INK,
+                &v,
+                unit,
+                if warn { amber.text } else { INK },
             );
             let steps = fan.steps.max(1);
             b.t.add(
@@ -2696,100 +2943,112 @@ pub fn fans(f: &Fonts, d: Option<&TempDetails>) -> Tree {
                 Paint::Steps {
                     n: steps,
                     on: fan.step.min(steps),
-                    on_color: INK2,
+                    on_color: if warn { amber.shape } else { INK2 },
                     off_color: theme::TRACK,
                 },
             );
-            let y = r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP;
+            let level = format!("level {}/{}", fan.step.min(steps), steps);
+            let reason = match fc {
+                None
+                | Some(Control {
+                    mode: FanMode::Auto,
+                    ..
+                }) => match fan.starts_at {
+                    Some(t) => format!("{level} · on at {} °C", trim0(t)),
+                    None => level,
+                },
+                Some(c) => match c.mode {
+                    FanMode::Manual => format!("manual · {}", auto_in(c.until, ui.now_s)),
+                    FanMode::Safety => format!(
+                        "CPU ≥ {} °C: back to auto",
+                        c.safety.map_or("75".into(), trim0)
+                    ),
+                    _ => "sensor fault: back to auto".into(),
+                },
+            };
+            let manual = mode == Some(FanMode::Manual);
             b.text(
                 c,
-                "rpm",
-                Rect::new(r.x, y, r.w, 18.0),
-                &format!("{} rpm", fan.rpm.unwrap_or(0)),
-                body(),
-                INK2,
+                "reason",
+                Rect::new(r.x, r.y + 32.0 + MIN_GAP + 8.0 + MIN_GAP, r.w, 16.0),
+                &reason,
+                small(),
+                if warn || manual { amber.text } else { INK2 },
             );
-            let trips: Vec<String> = fan
-                .trips
-                .iter()
-                .map(|t| {
-                    if t.fract() == 0.0 {
-                        format!("{t:.0}")
+            let steps = d_steps(1, d);
+            let top = fan.steps.max(1);
+            fan_controls(
+                &mut b,
+                c,
+                Rect::new(r.x, r.bottom() - 44.0, r.w, 44.0),
+                1,
+                ui.shown[1],
+                &|v| {
+                    if v == 0 {
+                        "Off".into()
                     } else {
-                        format!("{t:.1}")
+                        format!("{v}/{top}")
                     }
-                })
-                .collect();
-            if !trips.is_empty() {
-                b.text(
-                    c,
-                    "trips",
-                    Rect::new(r.x, y + 18.0 + MIN_GAP, r.w, 16.0),
-                    &format!("steps {} °C", trips.join(" · ")),
-                    small(),
-                    INK3,
-                );
-            }
+                },
+                &steps,
+            );
         }
         None => b.note(c, r, "No Active Cooler"),
     }
 
-    // what drives the case fan
-    let (c, r) = b.card(
-        "drive",
-        Rect::new(M, TOP + 136.0 + GAP, WIDTH, 100.0),
-        "WHAT DRIVES THE CASE FAN",
-        "the hotter one decides",
+    // how long manual lasts, and what always wins over it
+    let y = TOP + CARD_H + GAP;
+    let opts: Vec<&str> = prefs::FAN_FOR.iter().map(|(l, _)| *l).collect();
+    choice_row(&mut b, y, "Manual lasts", &opts, ui.fan_for.min(2), &|i| {
+        Nav::Pref(prefs::Change::FanFor(i as u8))
+    });
+    let note = match ui.error {
+        Some(e) => format!("Not changed: {e}"),
+        None => "Too hot or a sensor fault always overrules manual".into(),
+    };
+    let n = b.t.add(
+        None,
+        "hint",
+        Rect::new(M, y + 44.0 + GAP, WIDTH, 20.0),
+        Paint::None,
     );
-    match &d.case_fan {
-        Some(cf) => {
-            let (lo, hi) = (30.0_f64, 90.0_f64);
-            let at = |v: f64| ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;
-            let mut y = r.y + 2.0;
-            for (name, t, (start, full)) in [("NVMe", nvme, cf.nvme), ("CPU", cpu, cf.cpu)] {
-                let row =
-                    b.t.add(Some(c), name, Rect::new(r.x, y, r.w, 22.0), Paint::None);
-                b.text(
-                    row,
-                    "name",
-                    Rect::new(r.x, y, 48.0, 22.0),
-                    name,
-                    body(),
-                    INK2,
-                );
-                let v = t
-                    .map(|t| format!("{t:.1} °C"))
-                    .unwrap_or_else(|| "—".into());
-                let vw = 72.0;
-                b.text_right(
-                    row,
-                    "value",
-                    Rect::new(r.right() - vw, y, vw, 22.0),
-                    &v,
-                    mono(),
-                    INK,
-                );
-                let gx = r.x + 48.0 + GAP;
-                b.t.add(
-                    Some(row),
-                    "gauge",
-                    Rect::new(gx, y + 5.0, r.right() - vw - GAP - gx, 12.0),
-                    Paint::Gauge {
-                        pct: t.map(at).unwrap_or(0.0),
-                        track: theme::TRACK,
-                        fill: INK2,
-                        marks: vec![
-                            (at(start), INK3),
-                            (at(full), status_colors(Status::Attention).shape),
-                        ],
-                    },
-                );
-                y += 22.0 + GAP;
-            }
-        }
-        None => b.note(c, r, "fan_ctl isn’t installed"),
-    }
+    let w = b.f.width(&small(), &note).min(WIDTH);
+    b.text(
+        n,
+        "text",
+        Rect::new(M + (WIDTH - w) / 2.0, y + 44.0 + GAP, w, 20.0),
+        &note,
+        small(),
+        if ui.error.is_some() { amber.text } else { INK3 },
+    );
     b.t
+}
+
+/// fan_steps for the screen (the app's own copy of the rule).
+fn d_steps(which: u8, d: &TempDetails) -> Vec<u32> {
+    super::app::fan_steps(which, d)
+}
+
+/// 50.0 → "50", 67.5 → "67.5"
+fn trim0(t: f64) -> String {
+    if t.fract() == 0.0 {
+        format!("{t:.0}")
+    } else {
+        format!("{t:.1}")
+    }
+}
+
+/// 4248 → "4,248"
+fn group(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 // ---------------- Settings ----------------

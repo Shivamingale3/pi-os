@@ -27,6 +27,7 @@ mod collect;
 mod details;
 mod error;
 mod events;
+mod fans;
 mod helper;
 mod http;
 mod parse;

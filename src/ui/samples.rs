@@ -99,6 +99,12 @@ fn good_temps() -> TempDetails {
             steps: 4,
             starts_at: Some(50.0),
             trips: vec![50.0, 60.0, 67.5, 75.0],
+            control: Some(Control {
+                mode: FanMode::Auto,
+                manual: None,
+                until: None,
+                safety: Some(75.0),
+            }),
         }),
         case_fan: Some(CaseFan {
             duty: 60.0,
@@ -106,6 +112,7 @@ fn good_temps() -> TempDetails {
             min_duty: 60.0,
             nvme: (55.0, 72.0),
             cpu: (60.0, 80.0),
+            control: Some(Control::default()),
         }),
     }
 }
@@ -310,6 +317,13 @@ fn worst_temps() -> TempDetails {
             steps: 4,
             starts_at: Some(50.0),
             trips: vec![50.0, 60.0, 67.5, 75.0, 80.0, 85.0, 90.0, 95.0],
+            // set to Off by hand, overruled because the CPU is too hot
+            control: Some(Control {
+                mode: FanMode::Safety,
+                manual: Some(0),
+                until: Some(NOW_MS / 1000 + 43 * 60),
+                safety: Some(75.0),
+            }),
         }),
         // fan_ctl stopped: the fan sits at 100 %
         case_fan: Some(CaseFan {
@@ -318,6 +332,7 @@ fn worst_temps() -> TempDetails {
             min_duty: 0.0,
             nvme: (55.0, 72.0),
             cpu: (60.0, 80.0),
+            control: None,
         }),
     }
 }
@@ -867,6 +882,7 @@ mod tests {
                         steps: 0,
                         starts_at: None,
                         trips: vec![],
+                        control: None,
                     }),
                 ] {
                     let mut t = all.clone();
@@ -1115,6 +1131,162 @@ mod tests {
             assert!(rows.len() <= crate::ui::screens::EVENT_ROWS);
             assert!(rows.iter().all(|e| &crate::ui::utc_at(e.ts).1 == day));
         }
+    }
+
+    /// Every fan mode × manual value × a change not yet confirmed: no collisions, and the
+    /// controls offered match the state. `FANS_PNG=dir` also writes the manual views.
+    #[test]
+    fn fan_controls_never_collide() {
+        use crate::ui::app::{FanPending, fan_steps};
+        let f = Fonts::load();
+        let now_s = NOW_MS / 1000;
+        let ctl = |mode, manual, until| {
+            Some(Control {
+                mode,
+                manual,
+                until,
+                safety: Some(75.0),
+            })
+        };
+        let controls = |vals: &[u32]| {
+            let mut v = vec![
+                None,
+                ctl(FanMode::Auto, None, None),
+                ctl(FanMode::Failsafe, None, None),
+            ];
+            for m in vals {
+                for until in [
+                    None,
+                    Some(now_s + 59),
+                    Some(now_s + 3600),
+                    Some(now_s + 4 * 3600 + 60),
+                ] {
+                    v.push(ctl(FanMode::Manual, Some(*m), until));
+                }
+                v.push(ctl(FanMode::Safety, Some(*m), Some(now_s + 600)));
+            }
+            v
+        };
+        let out = std::env::var_os("FANS_PNG").map(PathBuf::from);
+        let mut n = 0;
+        for base in ["good", "worst"] {
+            let all = sample_app(base, Screen::Fans).unwrap().temps.unwrap();
+            let case_vals = fan_steps(0, &all);
+            let cool_vals = fan_steps(1, &all);
+            for cc in controls(&[0, case_vals[1], 100]) {
+                for fc in controls(&[0, 2, *cool_vals.last().unwrap()]) {
+                    let mut t = all.clone();
+                    if let Some(c) = t.case_fan.as_mut() {
+                        c.controller = true;
+                        c.control = cc.clone();
+                    }
+                    if let Some(x) = t.fan.as_mut() {
+                        x.control = fc.clone();
+                    }
+                    for pending in [None, Some(None), Some(Some(100))] {
+                        let mut a = sample_app(base, Screen::Fans).unwrap();
+                        a.temps = Some(t.clone());
+                        a.fan_pending = [pending.map(|want| FanPending {
+                            want,
+                            at: std::time::Instant::now(),
+                            sent: false,
+                        }); 2];
+                        let tr = tree(&a, &f);
+                        let v = layout::check(&tr);
+                        assert!(
+                            v.is_empty(),
+                            "{base} fans {cc:?} {fc:?} {pending:?}: {v:#?}"
+                        );
+                        // − / + only while manual; Auto / Manual only with fan_ctl's control
+                        let navs: Vec<_> = tr.items.iter().filter_map(|i| i.nav).collect();
+                        let has = |nav| navs.contains(&nav);
+                        let case_manual =
+                            cc.is_some() && a.fan_shown(0).is_some_and(|s| s.is_some());
+                        assert_eq!(has(Nav::FanAuto(0)), cc.is_some(), "{cc:?}");
+                        assert_eq!(
+                            has(Nav::FanStep(0, 1)) || has(Nav::FanStep(0, -1)),
+                            case_manual
+                        );
+                        a.screen = Some(Screen::Temps);
+                        assert!(
+                            layout::check(&tree(&a, &f)).is_empty(),
+                            "{base} temps {cc:?} {fc:?}"
+                        );
+                        n += 1;
+                    }
+                }
+            }
+        }
+        assert!(n > 500, "{n} layouts");
+        if let Some(dir) = out {
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut a = sample_app("good", Screen::Fans).unwrap();
+            let mut t = a.temps.clone().unwrap();
+            t.case_fan.as_mut().unwrap().duty = 75.0;
+            t.case_fan.as_mut().unwrap().control =
+                ctl(FanMode::Manual, Some(75), Some(now_s + 58 * 60));
+            let fan = t.fan.as_mut().unwrap();
+            (fan.step, fan.rpm) = (2, Some(4_344));
+            fan.control = ctl(FanMode::Manual, Some(2), Some(now_s + 58 * 60));
+            a.temps = Some(t);
+            let draw = |a: &App, name: &str| {
+                crate::ui::panel::frame(&tree(a, &f), &f, None)
+                    .pm
+                    .save_png(dir.join(name))
+                    .unwrap();
+            };
+            draw(&a, "fans-manual.png");
+            a.screen = Some(Screen::Temps);
+            draw(&a, "temps-manual.png");
+        }
+    }
+
+    #[test]
+    fn fan_taps_step_and_debounce() {
+        use crate::ui::app::FAN_DEBOUNCE;
+        let mut a = sample_app("good", Screen::Fans).unwrap();
+        let t0 = std::time::Instant::now();
+        // auto → Manual: held at the speed it runs now (60 %, cooler level 0)
+        a.go(Nav::FanManual(0));
+        assert_eq!(a.fan_shown(0), Some(Some(60)));
+        a.go(Nav::FanStep(0, -1));
+        assert_eq!(a.fan_shown(0), Some(Some(0)), "below the floor is Off");
+        a.go(Nav::FanStep(0, -1));
+        assert_eq!(a.fan_shown(0), Some(Some(0)), "stays Off");
+        for _ in 0..12 {
+            a.go(Nav::FanStep(0, 1));
+        }
+        assert_eq!(a.fan_shown(0), Some(Some(100)), "stops at 100 %");
+        a.go(Nav::FanStep(1, 1));
+        assert_eq!(a.fan_shown(1), Some(Some(1)), "cooler from its level now");
+        a.go(Nav::FanAuto(1));
+        assert_eq!(a.fan_shown(1), Some(None));
+        // steps wait for the taps to stop; the samples never send
+        let p = a.fan_pending[0].unwrap();
+        assert!(!p.sent && p.at >= t0);
+        assert!(a.next_due(std::time::Instant::now()) <= FAN_DEBOUNCE);
+        a.update(
+            Path::new("/nonexistent"),
+            std::time::Instant::now() + FAN_DEBOUNCE,
+        );
+        assert_eq!(
+            a.fan_pending,
+            [None, None],
+            "sent (samples: logged) and forgotten"
+        );
+        // without fan_ctl's control nothing changes
+        let mut a = sample_app("worst", Screen::Fans).unwrap();
+        a.go(Nav::FanManual(0));
+        assert_eq!((a.fan_shown(0), a.fan_pending[0]), (None, None));
+        // a new "manual lasts" resends a held speed
+        let mut a = sample_app("worst", Screen::Fans).unwrap();
+        a.go(Nav::Pref(crate::ui::prefs::Change::FanFor(0)));
+        assert_eq!(a.prefs.fan_for, 0);
+        assert_eq!(
+            a.fan_pending[1].map(|p| p.want),
+            Some(Some(0)),
+            "cooler held Off"
+        );
     }
 
     #[test]

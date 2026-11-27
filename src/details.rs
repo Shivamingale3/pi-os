@@ -72,6 +72,49 @@ pub struct Fan {
     /// every active trip point (°C), coolest first: where each speed step begins
     #[serde(default)]
     pub trips: Vec<f64>,
+    /// manual control through fan_ctl ≥ 0.2 (None: not available)
+    #[serde(default)]
+    pub control: Option<Control>,
+}
+
+/// Who sets a fan's speed (fan_ctl's status file).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FanMode {
+    /// the curves (case fan) or the kernel (Active Cooler)
+    #[default]
+    Auto,
+    /// held at a value set from the screen
+    Manual,
+    /// manual, but overruled because it got too hot
+    Safety,
+    /// a sensor failed: case fan 100 %, cooler back to the kernel
+    Failsafe,
+}
+
+impl FanMode {
+    pub fn parse(s: &str) -> Option<FanMode> {
+        Some(match s {
+            "auto" => FanMode::Auto,
+            "manual" => FanMode::Manual,
+            "safety" => FanMode::Safety,
+            "failsafe" => FanMode::Failsafe,
+            _ => return None,
+        })
+    }
+}
+
+/// One fan's manual-control state, from fan_ctl's status file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Control {
+    pub mode: FanMode,
+    /// the manual value (case fan %, cooler level), while one is set
+    pub manual: Option<u32>,
+    /// when it ends, unix s (None: until fan_ctl stops)
+    pub until: Option<i64>,
+    /// °C at which manual is overruled (CPU for the cooler; NVMe / CPU full for the case fan)
+    pub safety: Option<f64>,
 }
 
 /// The case fan run by fan_ctl (github.com/Shivamingale3/fan_ctl): read-only, PiOS never
@@ -86,6 +129,74 @@ pub struct CaseFan {
     pub min_duty: f64,
     pub nvme: (f64, f64),
     pub cpu: (f64, f64),
+    /// manual control through fan_ctl ≥ 0.2 (None: not available)
+    #[serde(default)]
+    pub control: Option<Control>,
+}
+
+/// The parts of /run/fan_ctl/status (fan_ctl ≥ 0.2) PiOS uses: `key = value` lines.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FanCtlStatus {
+    pub case: Control,
+    pub cooler: Option<Control>,
+    pub min_duty: Option<f64>,
+    pub nvme: Option<(f64, f64)>,
+    pub cpu: Option<(f64, f64)>,
+    /// unix s of fan_ctl's last step
+    pub updated: i64,
+}
+
+/// fan_ctl's status file is older than this: fan_ctl isn't running its loop.
+pub const FAN_CTL_STALE_S: i64 = 60;
+
+pub fn parse_fan_ctl_status(text: &str) -> Option<FanCtlStatus> {
+    let get = |k: &str| {
+        text.lines().find_map(|l| {
+            let (a, b) = l.split_once('=')?;
+            (a.trim() == k).then(|| b.split('#').next().unwrap_or("").trim())
+        })
+    };
+    let num = |k: &str| get(k).and_then(|v| v.parse::<f64>().ok());
+    let int = |k: &str| get(k).and_then(|v| v.parse::<i64>().ok());
+    let pair = |k: &str| {
+        let v = get(k)?;
+        let (a, b) = v.split_once(' ')?;
+        Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+    };
+    let until = |k: &str| int(k).filter(|u| *u > 0);
+    let nvme = pair("nvme_curve");
+    let cpu = pair("cpu_curve");
+    let case = Control {
+        mode: FanMode::parse(get("mode")?)?,
+        manual: int("manual").map(|v| v as u32),
+        until: until("until"),
+        safety: None,
+    };
+    let cooler = get("cooler_mode")
+        .and_then(FanMode::parse)
+        .map(|mode| Control {
+            mode,
+            manual: int("cooler_manual").map(|v| v as u32),
+            until: until("cooler_until"),
+            safety: num("cooler_safety"),
+        });
+    Some(FanCtlStatus {
+        case,
+        cooler,
+        min_duty: num("min_duty"),
+        nvme,
+        cpu,
+        updated: int("updated")?,
+    })
+}
+
+/// fan_ctl's live status, if it is ≥ 0.2, running, and fresh.
+fn fan_ctl_status() -> Option<FanCtlStatus> {
+    let s = parse_fan_ctl_status(&std::fs::read_to_string("/run/fan_ctl/status").ok()?)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    (now - s.updated < FAN_CTL_STALE_S).then_some(s)
 }
 
 impl CaseFan {
@@ -121,9 +232,15 @@ pub fn fan_ctl_config(text: Option<&str>) -> (String, u32, f64, (f64, f64), (f64
     (dev, ch, min, nvme, cpu)
 }
 
-fn case_fan() -> Option<CaseFan> {
+fn case_fan(status: Option<&FanCtlStatus>) -> Option<CaseFan> {
     let conf = std::fs::read_to_string("/etc/fan_ctl.conf").ok();
-    let (dev, ch, min_duty, nvme, cpu) = fan_ctl_config(conf.as_deref());
+    let (dev, ch, mut min_duty, mut nvme, mut cpu) = fan_ctl_config(conf.as_deref());
+    // the running controller's own numbers win over the file (it may not be reloaded yet)
+    if let Some(s) = status {
+        min_duty = s.min_duty.unwrap_or(min_duty);
+        nvme = s.nvme.unwrap_or(nvme);
+        cpu = s.cpu.unwrap_or(cpu);
+    }
     for e in std::fs::read_dir("/sys/class/pwm").ok()?.flatten() {
         let chip = e.path();
         let Ok(d) = std::fs::canonicalize(chip.join("device")) else {
@@ -151,6 +268,7 @@ fn case_fan() -> Option<CaseFan> {
             min_duty,
             nvme,
             cpu,
+            control: status.filter(|_| controller).map(|s| s.case.clone()),
         });
     }
     None
@@ -414,6 +532,7 @@ pub fn temps() -> Result<TempDetails> {
                         trips.sort_by(f64::total_cmp);
                         trips.clone()
                     },
+                    control: None,
                 });
                 continue;
             }
@@ -462,10 +581,14 @@ pub fn temps() -> Result<TempDetails> {
         }
     }
     found.sort_by_key(|(prio, _)| *prio);
+    let status = fan_ctl_status();
+    if let Some(f) = fan.as_mut() {
+        f.control = status.as_ref().and_then(|s| s.cooler.clone());
+    }
     Ok(TempDetails {
         sensors: found.into_iter().map(|(_, s)| s).collect(),
         fan,
-        case_fan: case_fan(),
+        case_fan: case_fan(status.as_ref()),
     })
 }
 
@@ -915,10 +1038,57 @@ mod tests {
             min_duty: 60.0,
             nvme: (55.0, 72.0),
             cpu: (60.0, 80.0),
+            control: None,
         };
         assert_eq!(f.wants(f.nvme, 40.0), 60.0);
         assert_eq!(f.wants(f.nvme, 72.0), 100.0);
         assert!((f.wants(f.cpu, 70.0) - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn fan_ctl_status_file() {
+        // as fan_ctl 0.2.0 writes it
+        let t = "version = 0.2.0\nmode = manual\nduty = 75\nauto = 60\nmanual = 75\nuntil = 1795716462\n\
+                 cpu = 42.5\nnvme = 51.8\nmin_duty = 60\ncpu_curve = 60 80\nnvme_curve = 55 72\n\
+                 cooler_mode = safety\ncooler = 0\ncooler_max = 4\ncooler_rpm = 0\n\
+                 cooler_manual = 0\ncooler_until = 0\ncooler_safety = 75\nupdated = 1795711297\n";
+        let s = parse_fan_ctl_status(t).unwrap();
+        assert_eq!(
+            s.case,
+            Control {
+                mode: FanMode::Manual,
+                manual: Some(75),
+                until: Some(1_795_716_462),
+                safety: None
+            }
+        );
+        assert_eq!(
+            s.cooler,
+            Some(Control {
+                mode: FanMode::Safety,
+                manual: Some(0),
+                until: None,
+                safety: Some(75.0)
+            })
+        );
+        assert_eq!(
+            (s.min_duty, s.nvme, s.cpu),
+            (Some(60.0), Some((55.0, 72.0)), Some((60.0, 80.0)))
+        );
+        assert_eq!(s.updated, 1_795_711_297);
+        // auto, no cooler
+        let a = parse_fan_ctl_status("mode = auto\nduty = 60\nupdated = 5\n").unwrap();
+        assert_eq!(
+            (a.case.mode, a.case.manual, a.cooler),
+            (FanMode::Auto, None, None)
+        );
+        // not a status file
+        assert!(parse_fan_ctl_status("").is_none());
+        assert!(parse_fan_ctl_status("mode = turbo\nupdated = 5\n").is_none());
+        assert!(
+            parse_fan_ctl_status("mode = auto\n").is_none(),
+            "no timestamp"
+        );
     }
 
     #[test]

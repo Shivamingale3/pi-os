@@ -1,6 +1,8 @@
 //! `pios helper`: the only PiOS process that touches Docker (it runs as root; the agent doesn't).
 //! It forwards exactly two read-only requests and one action, restarting one container by its
 //! full ID, and answers 403 to anything else, so access to its socket is not access to Docker.
+//! It also does one thing outside Docker: edits fan_ctl's manual override (`fans.rs`), one fan
+//! at a time, with values checked again here.
 //!
 //! systemd starts it through `pios-helper.socket` and hands over the listening socket as fd 3
 //! (socket activation). Without systemd, set PIOS_HELPER_SOCKET to listen on a path (tests).
@@ -46,7 +48,7 @@ fn restart_id(target: &str) -> Option<&str> {
 pub fn decide(method: &str, target: &str) -> Option<(u16, String)> {
     let ok = match method {
         "GET" => ALLOWLIST.contains(&target),
-        "POST" => restart_id(target).is_some(),
+        "POST" => restart_id(target).is_some() || crate::fans::parse_helper(target).is_some(),
         _ => return Some((405, r#"{"error":"only GET, or POST to restart"}"#.into())),
     };
     if !ok {
@@ -96,6 +98,19 @@ fn handle(stream: &mut UnixStream, docker: &Path) -> std::io::Result<()> {
     };
     if let Some((status, body)) = decide(&method, &target) {
         return http::respond(stream, status, &body);
+    }
+    if let Some(c) = crate::fans::parse_helper(&target) {
+        return match crate::fans::write(&crate::fans::dir(), &c) {
+            Ok(()) => http::respond(stream, 200, r#"{"status":"ok"}"#),
+            Err(e) => {
+                eprintln!("pios helper: fan override: {e}");
+                http::respond(
+                    stream,
+                    503,
+                    &serde_json::json!({ "error": e.to_string() }).to_string(),
+                )
+            }
+        };
     }
     if let Some(id) = restart_id(&target) {
         // on its own thread, so the 5 s container list keeps answering meanwhile
@@ -184,6 +199,24 @@ mod tests {
         assert_eq!(decide("POST", ALLOWED).map(|d| d.0), Some(403));
         assert_eq!(decide("DELETE", "/containers/x").map(|d| d.0), Some(405));
         assert_eq!(decide("PUT", ALLOWED).map(|d| d.0), Some(405));
+    }
+
+    #[test]
+    fn fan_overrides_pass_only_in_the_helper_form() {
+        assert_eq!(decide("POST", "/fan_ctl/case?duty=75&until=0"), None);
+        assert_eq!(decide("POST", "/fan_ctl/cooler/auto"), None);
+        for bad in [
+            "/fans/case?duty=75&for=3600",
+            "/fan_ctl/case?duty=75",
+            "/fan_ctl/case?duty=750&until=0",
+            "/fan_ctl/override",
+        ] {
+            assert_eq!(decide("POST", bad).map(|d| d.0), Some(403), "{bad}");
+        }
+        assert_eq!(
+            decide("GET", "/fan_ctl/cooler/auto").map(|d| d.0),
+            Some(403)
+        );
     }
 
     #[test]

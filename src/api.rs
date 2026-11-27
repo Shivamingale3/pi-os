@@ -9,7 +9,9 @@
 //!   GET /alerts?after=ID      phone alerts to send (pios web); GET /alerts/status: is it working
 //!   POST /alerts/prefs?… · POST /alerts/test   the screen's Alerts settings and test button
 //!   GET /details/TILE         cpu · temps · memory · disk · services, collected on request (screen open)
-//!   POST /containers/ID/restart   the screen's one action (202 at once; progress in /details/services)
+//!   POST /containers/ID/restart   the screen's restart (202 at once; progress in /details/services)
+//!   POST /fans/case?duty=N&for=S · /fans/cooler?level=N&for=S · /fans/{case,cooler}/auto
+//!                             manual fan control through fan_ctl (fans.rs)
 //!
 //! Try: curl --unix-socket data/pios.sock http://pios/now
 
@@ -90,11 +92,15 @@ fn handle(
         http::Request::Line { method, target } if method == "POST" => {
             if target.starts_with("/alerts/") {
                 alert_action(&target, db_path)
+            } else if target.starts_with("/fans/") {
+                let (status, msg) = crate::fans::ask(&helper_socket(), &target);
+                let key = if status < 300 { "status" } else { "error" };
+                (status, json!({ key: msg }))
             } else {
                 action(&target, live)
             }
         }
-        http::Request::Line { .. } => (405, json!({"error": "only GET, or POST to restart"})),
+        http::Request::Line { .. } => (405, json!({"error": "only GET or POST"})),
     };
     http::respond(stream, status, &body.to_string())
 }
@@ -142,13 +148,17 @@ pub fn action(target: &str, live: &Live) -> (u16, Value) {
         .and_then(|g| g.as_ref()?.docker.clone())
         .map(|d| d.containers.into_iter().map(|c| (c.id, c.name)).collect())
         .unwrap_or_default();
-    let helper = std::env::var_os("PIOS_DOCKER_SOCKET")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"));
-    let (status, msg) = crate::services::ask_restart(&helper, id, &known);
+    let (status, msg) = crate::services::ask_restart(&helper_socket(), id, &known);
     let key = if status < 300 { "status" } else { "error" };
     (status, json!({ key: msg }))
+}
+
+/// The helper's socket (on the Pi; Docker's own socket on a laptop).
+fn helper_socket() -> PathBuf {
+    std::env::var_os("PIOS_DOCKER_SOCKET")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/run/docker.sock"))
 }
 
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {

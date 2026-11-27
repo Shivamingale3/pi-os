@@ -1,8 +1,10 @@
-# Root, started by pios-helper.socket. Forwards exactly one read-only request to Docker
-# (GET /containers/json?all=true) and refuses everything else.
+# Root, started by pios-helper.socket. Forwards an allow-list of Docker requests (see
+# helper.rs) and edits fan_ctl's manual override; refuses everything else.
 [Unit]
 Description=PiOS helper (filtered Docker access)
 Requires=pios-helper.socket
+# /run/fan_ctl must exist when the helper starts, for the ReadWritePaths= below
+After=fan_ctl.service
 
 [Service]
 Type=simple
@@ -17,6 +19,8 @@ TasksMax=4
 NoNewPrivileges=yes
 CapabilityBoundingSet=
 ProtectSystem=strict
+# the only path it writes: fan_ctl's override (fan_ctl ≥ 0.2 keeps the directory; "-": optional)
+ReadWritePaths=-/run/fan_ctl
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
