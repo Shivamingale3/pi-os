@@ -1525,10 +1525,12 @@ fn data_disk(b: &mut B, d: &DataDisk, reads: &[f32], writes: &[f32]) {
     let amber = status_colors(Status::Attention).shape;
     let bad = s.reallocated + s.pending + s.uncorrectable;
     let bad_now = s.pending + s.uncorrectable + s.reallocated_new > 0;
+    // only rises matter: a lifetime count from an earlier life (another cable, another
+    // machine) would look like a fault that isn't there
     let cable = if s.crc_new > 0 {
-        format!("+{} new · {}", group(s.crc_new), group(s.crc))
+        format!("{} new today", group(s.crc_new))
     } else {
-        group(s.crc)
+        "none new".to_string()
     };
     let test = match (s.test.as_str(), s.test_ago_sec) {
         ("", _) => "none yet".to_string(),
