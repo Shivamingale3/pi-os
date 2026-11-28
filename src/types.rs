@@ -140,6 +140,35 @@ pub struct Snapshot {
     /// None when no `web` lines are set up, or `pios web` hasn't reported for 3 minutes
     #[serde(default)]
     pub web: Option<Web>,
+    /// the data disk (first `mount` line); None when none is set up
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_disk: Option<crate::details::DataDisk>,
+    /// Tailscale's state, when it runs here
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tailscale: Option<Tailscale>,
+    /// other yes/no checks (data disk, Tailscale login, supply voltage); each bad one becomes an
+    /// incident after 30 s, like a stopped service
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<Flag>,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Tailscale {
+    /// tailscaled's BackendState: Running, NeedsLogin, Stopped, ...
+    pub state: String,
+    /// when its login (node key) expires, ms since the epoch; None = never (expiry disabled)
+    pub key_expiry: Option<i64>,
+}
+
+/// One yes/no check. `key` is stable ("check:data-disk"); `critical` = red, else amber.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Flag {
+    pub key: String,
+    pub title: String,
+    pub bad: bool,
+    pub critical: bool,
 }
 
 pub fn now_ms() -> i64 {

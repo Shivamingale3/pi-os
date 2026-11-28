@@ -3,6 +3,8 @@
 #
 # host NAME          a systemd service that should be running (nginx or nginx.service)
 # web HOST[/PATH] [CODE]  https://HOST/PATH should answer CODE (default 200); no redirects followed
+# mount PATH         a data disk that should be mounted at PATH (the Disk screen's Data tab;
+#                    health needs smartmontools)
 #
 # host nginx
 # host ssh

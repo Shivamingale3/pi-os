@@ -100,6 +100,8 @@ pub enum Kind {
     Unit,
     /// a public hostname (`web` line)
     Web,
+    /// another yes/no check (data disk, Tailscale login, voltage; watch.rs)
+    Check,
 }
 
 impl Kind {
@@ -110,6 +112,7 @@ impl Kind {
             Kind::Docker => "docker",
             Kind::Unit => "unit",
             Kind::Web => "web",
+            Kind::Check => "check",
         }
     }
 }
@@ -207,7 +210,7 @@ impl Engine {
         let gone: Vec<String> = self
             .states
             .keys()
-            .filter(|k| k.starts_with("unit:") || k.starts_with("web:"))
+            .filter(|k| k.starts_with("unit:") || k.starts_with("web:") || k.starts_with("check:"))
             .filter(|k| !conds.iter().any(|c| &c.key == *k))
             .cloned()
             .collect();
@@ -355,6 +358,19 @@ impl Engine {
                 !c.ok && c.fails >= 2,
             );
             if !c.down() {
+                cond.severity = Severity::Warn;
+            }
+            out.push(cond);
+        }
+        for f in &s.checks {
+            let mut cond = flag(
+                f.key.clone(),
+                Kind::Check,
+                f.key.trim_start_matches("check:").to_string(),
+                f.title.clone(),
+                f.bad,
+            );
+            if !f.critical {
                 cond.severity = Severity::Warn;
             }
             out.push(cond);
@@ -512,6 +528,9 @@ pub mod tests {
             docker: None,
             units: None,
             web: None,
+            data_disk: None,
+            tailscale: None,
+            checks: vec![],
         }
     }
 
@@ -701,6 +720,68 @@ pub mod tests {
             "{a:?}"
         );
         assert!(e.open_keys().is_empty());
+    }
+
+    #[test]
+    fn checks_open_warn_or_critical_and_close() {
+        use crate::types::Flag;
+        let flag = |bad, critical| Flag {
+            key: "check:tailscale".into(),
+            title: "Tailscale login ends in 6 d".into(),
+            bad,
+            critical,
+        };
+        let mut e = Engine::new();
+        let mut opened = None;
+        for i in 0..8 {
+            let mut s = snap(i * 5000, 1.0);
+            s.checks = vec![flag(true, false)];
+            for a in e.step(&s) {
+                if let Action::Open(o) = a {
+                    opened = Some((o.kind, o.severity, o.title));
+                }
+            }
+        }
+        assert_eq!(
+            opened,
+            Some((
+                Kind::Check,
+                Severity::Warn,
+                "Tailscale login ends in 6 d".into()
+            ))
+        );
+        // fixed: closes after 60 s clear
+        let mut closed = false;
+        for i in 8..30 {
+            let mut s = snap(i * 5000, 1.0);
+            s.checks = vec![flag(false, false)];
+            closed |= e.step(&s).iter().any(|a| {
+                matches!(
+                    a,
+                    Action::Close {
+                        reason: "recovered",
+                        ..
+                    }
+                )
+            });
+        }
+        assert!(closed);
+        // a check that stops being reported (mount line removed) closes at once
+        let mut e = Engine::new();
+        for i in 0..8 {
+            let mut s = snap(i * 5000, 1.0);
+            s.checks = vec![flag(true, true)];
+            e.step(&s);
+        }
+        assert_eq!(e.open_keys(), ["check:tailscale"]);
+        let a = e.step(&snap(50_000, 1.0));
+        assert!(a.iter().any(|a| matches!(
+            a,
+            Action::Close {
+                reason: "no longer checked",
+                ..
+            }
+        )));
     }
 
     #[test]

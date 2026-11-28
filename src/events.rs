@@ -275,6 +275,44 @@ pub fn parse_boots(text: &str) -> Vec<(String, Event)> {
     out
 }
 
+/// Did this boot end with a clean shutdown? systemd's last words on one are "Shutting down.";
+/// after a power cut or a hard reset the journal just stops. None: can't tell (no journal).
+pub fn ended_cleanly(boot_id: &str) -> Option<bool> {
+    if boot_id.len() != 32 || !boot_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let out = Command::new("journalctl")
+        .args([
+            "--no-pager",
+            "-b",
+            boot_id,
+            "_PID=1",
+            "-n",
+            "1",
+            "-o",
+            "cat",
+        ])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let last = text.lines().last()?.trim();
+    Some(clean_end(last))
+}
+
+/// systemd's last line on a clean shutdown, reboot, halt or kexec.
+pub fn clean_end(last: &str) -> bool {
+    last.starts_with("Shutting down")
+}
+
+/// Boots after one that didn't end cleanly become "power_lost" (same time and off-time).
+pub fn mark_power_lost(boots: &mut [(String, Event)], clean: &dyn Fn(&str) -> Option<bool>) {
+    for i in 1..boots.len() {
+        if clean(&boots[i - 1].0) == Some(false) {
+            boots[i].1.kind = "power_lost".into();
+        }
+    }
+}
+
 pub fn read_boots() -> Result<Vec<(String, Event)>> {
     let out = Command::new("journalctl")
         .args(["--no-pager", "--list-boots", "--output=json"])
@@ -284,8 +322,15 @@ pub fn read_boots() -> Result<Vec<(String, Event)>> {
 }
 
 /// Newest first, SSH logins (and failures) by the same user from the same address within
-/// MERGE_MS of the newest one merged into one row.
+/// MERGE_MS of the newest one merged into one row. A boot also stored as "power_lost" (found
+/// after it was first recorded) shows once, as the power loss.
 pub fn merge(mut list: Vec<Event>) -> Vec<Event> {
+    let lost: Vec<i64> = list
+        .iter()
+        .filter(|e| e.kind == "power_lost")
+        .map(|e| e.ts)
+        .collect();
+    list.retain(|e| !(e.kind == "boot" && lost.contains(&e.ts)));
     list.sort_by_key(|e| std::cmp::Reverse(e.ts));
     let mut out: Vec<Event> = Vec::new();
     for e in list {
@@ -448,6 +493,36 @@ not json"#;
             ("b", 2_013_000, "13000")
         );
         assert!(parse_boots("garbage").is_empty());
+    }
+
+    #[test]
+    fn power_lost_after_an_unclean_end() {
+        let t = r#"[{"boot_id":"a","first_entry":1000000000,"last_entry":2000000000},
+                    {"boot_id":"b","first_entry":2013000000,"last_entry":3000000000},
+                    {"boot_id":"c","first_entry":3120000000,"last_entry":4000000000}]"#;
+        let mut b = parse_boots(t);
+        // a ended cleanly, b just stopped (power cut), c is running
+        mark_power_lost(&mut b, &|id| match id {
+            "a" => Some(true),
+            "b" => Some(false),
+            _ => None,
+        });
+        let kinds: Vec<&str> = b.iter().map(|(_, e)| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["boot", "boot", "power_lost"]);
+        assert_eq!(b[2].1.detail, "120000", "keeps how long it was off");
+        assert!(clean_end("Shutting down."));
+        assert!(!clean_end(
+            "Finished apt-daily.service - Daily apt download activities."
+        ));
+        assert_eq!(ended_cleanly("../x"), None);
+        // stored twice (boot first, power_lost found later): shown once, as the power loss
+        let shown = merge(vec![b[1].1.clone(), b[2].1.clone(), {
+            let mut e = b[2].1.clone();
+            e.kind = "boot".into();
+            e
+        }]);
+        let kinds: Vec<&str> = shown.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, ["power_lost", "boot"]);
     }
 
     #[test]

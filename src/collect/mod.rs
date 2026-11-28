@@ -30,6 +30,11 @@ pub struct Collector {
 const CHECKS_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Collector {
+    /// The data disks to watch (`mount` lines of /etc/pios/checks, as last read).
+    pub fn mounts(&self) -> &[String] {
+        &self.checks.mounts
+    }
+
     /// Takes the baseline counters. The first `collect` should come about a second later.
     pub fn new(docker_socket: PathBuf) -> Result<Self> {
         Ok(Self {
@@ -73,6 +78,10 @@ impl Collector {
             docker: docker::read(&self.docker_socket, DOCKER_TIMEOUT).ok(),
             units: crate::checks::units(&self.checks),
             web: crate::checks::web(&self.checks, &crate::checks::web_out(), ts),
+            // filled by the agent's watch (watch.rs): it needs the store and the helper
+            data_disk: None,
+            tailscale: None,
+            checks: vec![],
         })
     }
 }

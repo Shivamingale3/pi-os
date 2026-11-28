@@ -193,10 +193,16 @@ pub fn route(target: &str, live: &Live, db: Option<&Connection>) -> (u16, Value)
             }
             "memory" => crate::details::memory(snap.as_ref())
                 .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            "disk" => crate::details::disk(&docker)
-                .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
-            "services" => crate::services::collect(&docker)
-                .map(|d| serde_json::to_value(d).unwrap_or(Value::Null)),
+            "disk" => crate::details::disk(&docker).map(|mut d| {
+                d.data = snap.as_ref().and_then(|s| s.data_disk.clone());
+                serde_json::to_value(d).unwrap_or(Value::Null)
+            }),
+            "services" => crate::services::collect(&docker).map(|mut d| {
+                if let Some(t) = snap.as_ref().and_then(|s| s.tailscale.as_ref()) {
+                    crate::services::note_tailscale(&mut d.host, t, now_ms());
+                }
+                serde_json::to_value(d).unwrap_or(Value::Null)
+            }),
             _ => {
                 return (
                     404,

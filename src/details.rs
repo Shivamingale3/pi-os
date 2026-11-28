@@ -351,6 +351,107 @@ pub struct DiskDetails {
     pub read_bps: f64,
     pub write_bps: f64,
     pub docker: Option<DockerDf>,
+    /// the data disk (the first `mount` line in /etc/pios/checks); None = no such line
+    #[serde(default)]
+    pub data: Option<DataDisk>,
+}
+
+/// A data disk (USB): its filesystem, I/O and health.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataDisk {
+    /// where it should be mounted ("/mnt/data")
+    pub mount: String,
+    pub mounted: bool,
+    /// mounted read-only (ext4 does this after errors)
+    #[serde(default)]
+    pub read_only: bool,
+    /// filesystem label and type ("pidata", "ext4")
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub fstype: String,
+    pub used: u64,
+    pub size: u64,
+    pub percent: f64,
+    /// "ST1000LM035-1RK172", bytes, "USB 3 · 5 Gb/s"
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub dev_size: u64,
+    #[serde(default)]
+    pub link: String,
+    pub read_bps: f64,
+    pub write_bps: f64,
+    /// seconds since the last read or write (None: unknown)
+    #[serde(default)]
+    pub idle_sec: Option<u64>,
+    /// from the last health check (every 30 min while the disk is awake)
+    #[serde(default)]
+    pub smart: Option<Smart>,
+}
+
+/// The disk's own health report (SMART).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Smart {
+    /// its overall verdict
+    pub passed: bool,
+    /// sectors moved to spares, waiting to be moved, unreadable
+    pub reallocated: u64,
+    pub pending: u64,
+    pub uncorrectable: u64,
+    /// USB/SATA cable errors (a lifetime count; a rise is what matters)
+    pub crc: u64,
+    /// rises within the last day (against a baseline kept in the agent's store)
+    #[serde(default)]
+    pub crc_new: u64,
+    #[serde(default)]
+    pub reallocated_new: u64,
+    pub temp_c: Option<f64>,
+    pub hours: u64,
+    /// last self-test: "passed", "failed", "running 40 %", "" (none)
+    #[serde(default)]
+    pub test: String,
+    /// seconds since that test ended (None: unknown or still running)
+    #[serde(default)]
+    pub test_ago_sec: Option<u64>,
+    /// in standby when last asked (it is never woken just to be asked)
+    #[serde(default)]
+    pub asleep: bool,
+    /// seconds since this report was read
+    pub age_sec: u64,
+}
+
+/// Disk temperatures (°C): amber from the first, red from the second (laptop disks are rated
+/// to 60 °C; a long self-test in a closed enclosure runs near 47 °C).
+pub const DISK_HOT: (f64, f64) = (55.0, 60.0);
+
+impl Smart {
+    /// 0 fine, 1 needs attention, 2 failing; and why (for the incident title).
+    pub fn level(&self) -> (u8, String) {
+        let temp = self.temp_c.unwrap_or(0.0);
+        if !self.passed {
+            (2, "failing its health check".into())
+        } else if temp >= DISK_HOT.1 {
+            (2, format!("at {temp:.0} °C"))
+        } else if self.pending + self.uncorrectable > 0 {
+            (
+                1,
+                format!("{} unreadable sectors", self.pending + self.uncorrectable),
+            )
+        } else if self.reallocated_new > 0 {
+            (1, format!("{} new bad sectors", self.reallocated_new))
+        } else if self.crc_new > 0 {
+            (1, "new USB cable errors".into())
+        } else if self.test == "failed" {
+            (1, "self-test failed".into())
+        } else if temp >= DISK_HOT.0 {
+            (1, format!("at {temp:.0} °C"))
+        } else {
+            (0, String::new())
+        }
+    }
 }
 
 // ---------------- CPU ----------------
@@ -903,6 +1004,7 @@ pub fn disk(docker_socket: &Path) -> Result<DiskDetails> {
         read_bps,
         write_bps,
         docker: docker_df(docker_socket),
+        data: None,
     })
 }
 

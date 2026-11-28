@@ -41,7 +41,7 @@ impl Screen {
             "cpu" => Screen::Cpu,
             "temps" => Screen::Temps,
             "memory" => Screen::Memory,
-            "disk" => Screen::Disk,
+            "disk" | "data" => Screen::Disk,
             "history" => Screen::History,
             "incident" => Screen::Incident(1),
             "services" | "host" | "web" => Screen::Services,
@@ -69,6 +69,15 @@ pub fn tab_for(name: &str) -> screens::Tab {
     }
 }
 
+/// `--screen data`: the Disk screen on its Data tab.
+pub fn disk_tab_for(name: &str) -> screens::DiskTab {
+    if name == "data" {
+        screens::DiskTab::Data
+    } else {
+        screens::DiskTab::Ssd
+    }
+}
+
 /// `--screen events`: History on its Events tab.
 pub fn hist_tab_for(name: &str) -> screens::HistTab {
     if name == "events" {
@@ -78,12 +87,13 @@ pub fn hist_tab_for(name: &str) -> screens::HistTab {
     }
 }
 
-pub const SCREENS: [&str; 20] = [
+pub const SCREENS: [&str; 21] = [
     "home",
     "cpu",
     "temps",
     "memory",
     "disk",
+    "data",
     "history",
     "events",
     "incident",
@@ -176,6 +186,11 @@ pub struct App {
     pub temp_trend: Vec<f32>,
     pub reads: VecDeque<f32>,
     pub writes: VecDeque<f32>,
+    /// the data disk's I/O, one point per refresh
+    pub data_reads: VecDeque<f32>,
+    pub data_writes: VecDeque<f32>,
+    /// the Disk screen's open tab
+    pub disk_tab: screens::DiskTab,
     pub incidents: Option<Vec<Incident>>,
     pub incident: Option<IncidentFull>,
     pub services: Option<Services>,
@@ -276,6 +291,14 @@ impl App {
                 }
                 self.hist_tab = t;
                 Screen::History
+            }
+            Nav::Tab(i) if self.screen() == Screen::Disk => {
+                self.disk_tab = if i == 0 {
+                    screens::DiskTab::Ssd
+                } else {
+                    screens::DiskTab::Data
+                };
+                Screen::Disk
             }
             Nav::Tab(i) => {
                 let t = screens::Tab::ALL[(i as usize).min(2)];
@@ -384,6 +407,9 @@ impl App {
         if next == Screen::Disk && self.screen() != Screen::Disk {
             self.reads.clear();
             self.writes.clear();
+            self.data_reads.clear();
+            self.data_writes.clear();
+            self.disk_tab = self.problem_disk_tab();
         }
         self.screen = Some(next);
     }
@@ -599,9 +625,15 @@ impl App {
                 "disk" => {
                     self.disk = super::get_json::<DiskDetails>(socket, "/details/disk").ok();
                     if let Some(d) = &self.disk {
+                        let (dr, dw) = d
+                            .data
+                            .as_ref()
+                            .map_or((0.0, 0.0), |x| (x.read_bps, x.write_bps));
                         for (q, v) in [
                             (&mut self.reads, d.read_bps),
                             (&mut self.writes, d.write_bps),
+                            (&mut self.data_reads, dr),
+                            (&mut self.data_writes, dw),
                         ] {
                             q.push_back(v as f32);
                             while q.len() > IO_POINTS {
@@ -699,6 +731,16 @@ impl App {
     }
 
     /// Services opens on the first tab with a problem (from Home's data), else Apps.
+    /// The Disk screen opens on Data when the data disk has a problem (as last seen).
+    fn problem_disk_tab(&self) -> screens::DiskTab {
+        match self.disk.as_ref().and_then(|d| d.data.as_ref()) {
+            Some(dd) if screens::data_status(dd) != super::theme::Status::Good => {
+                screens::DiskTab::Data
+            }
+            _ => screens::DiskTab::Ssd,
+        }
+    }
+
     fn problem_tab(&self) -> screens::Tab {
         let Some(s) = &self.home.snapshot else {
             return screens::Tab::Apps;
@@ -779,12 +821,24 @@ impl App {
     ) -> Tree {
         let reads: Vec<f32> = self.reads.iter().copied().collect();
         let writes: Vec<f32> = self.writes.iter().copied().collect();
+        let data_reads: Vec<f32> = self.data_reads.iter().copied().collect();
+        let data_writes: Vec<f32> = self.data_writes.iter().copied().collect();
         match self.screen() {
             Screen::Home => Home::build(&self.home, time, date).tree(f),
             Screen::Cpu => screens::cpu(f, self.cpu.as_ref(), &self.cpu_trend),
             Screen::Temps => screens::temps(f, self.temps.as_ref(), &self.temp_trend),
             Screen::Memory => screens::memory(f, self.mem.as_ref()),
-            Screen::Disk => screens::disk(f, self.disk.as_ref(), &reads, &writes),
+            Screen::Disk => screens::disk(
+                f,
+                self.disk.as_ref(),
+                self.disk_tab,
+                screens::DiskIo {
+                    reads: &reads,
+                    writes: &writes,
+                    data_reads: &data_reads,
+                    data_writes: &data_writes,
+                },
+            ),
             Screen::History => screens::history(
                 f,
                 self.incidents.as_deref(),

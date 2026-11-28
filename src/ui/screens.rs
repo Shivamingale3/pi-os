@@ -16,7 +16,9 @@ use super::layout::{Marker, Nav, Paint, Rect, Tree};
 use super::prefs::{self, Prefs};
 use super::ring;
 use super::theme::{self, GAP, INK, INK2, INK3, MIN_GAP, PAD_TILE, Status, size, status_colors};
-use crate::details::{CaseFan, Control, CpuDetails, DiskDetails, FanMode, MemDetails, TempDetails};
+use crate::details::{
+    CaseFan, Control, CpuDetails, DataDisk, DiskDetails, FanMode, MemDetails, TempDetails,
+};
 use crate::events::Event;
 use crate::rules::THRESHOLDS;
 use crate::services::{Service, Services};
@@ -1026,12 +1028,46 @@ pub fn memory(f: &Fonts, d: Option<&MemDetails>) -> Tree {
 
 // ---------------- Disk ----------------
 
-pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -> Tree {
+/// The Disk screen's tabs (only when a data disk is set up).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiskTab {
+    #[default]
+    Ssd,
+    Data,
+}
+
+/// I/O history for the Disk screen: the system drive's and the data disk's.
+pub struct DiskIo<'a> {
+    pub reads: &'a [f32],
+    pub writes: &'a [f32],
+    pub data_reads: &'a [f32],
+    pub data_writes: &'a [f32],
+}
+
+pub fn disk(f: &Fonts, d: Option<&DiskDetails>, tab: DiskTab, io: DiskIo) -> Tree {
     let mut b = B::new(f);
     let Some(d) = d else {
         return reading(&mut b, "Disk");
     };
-    b.header("Disk", "");
+    match &d.data {
+        Some(dd) => {
+            let warn = data_status(dd) != Status::Good;
+            tabs_header(
+                &mut b,
+                "Disk",
+                &["SSD", "Data"],
+                TAB_W,
+                tab as usize,
+                &[false, warn],
+            );
+            if tab == DiskTab::Data {
+                data_disk(&mut b, dd, io.data_reads, io.data_writes);
+                return b.t;
+            }
+        }
+        None => b.header("Disk", ""),
+    }
+    let (reads, writes) = (io.reads, io.writes);
 
     // root + one more filesystem
     let root = d.filesystems.first();
@@ -1245,6 +1281,289 @@ pub fn disk(f: &Fonts, d: Option<&DiskDetails>, reads: &[f32], writes: &[f32]) -
         y += 18.0 + 6.0;
     }
     b.t
+}
+
+/// The data disk's state: not mounted or read-only is red; disk health, heat and space as usual.
+pub fn data_status(d: &DataDisk) -> Status {
+    if !d.mounted || d.read_only {
+        return Status::Down;
+    }
+    let mut st = level("disk.usedPercent", d.percent);
+    if let Some(s) = &d.smart {
+        let h = smart_status(s);
+        st = st.max(h);
+    }
+    st
+}
+
+/// The disk's own report: failing → red; bad sectors, new cable errors, a failed test, heat → amber.
+pub fn smart_status(s: &crate::details::Smart) -> Status {
+    match s.level().0 {
+        2 => Status::Down,
+        1 => Status::Attention,
+        _ => Status::Good,
+    }
+}
+
+fn data_disk(b: &mut B, d: &DataDisk, reads: &[f32], writes: &[f32]) {
+    let f = b.f;
+    let down = status_colors(Status::Down).shape;
+    // space
+    let right = [d.label.as_str(), d.fstype.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let (c, r) = b.card(
+        "space",
+        Rect::new(M, TOP, 304.0, 116.0),
+        &d.mount.to_uppercase(),
+        &right,
+    );
+    if d.mounted {
+        let pct = d.percent;
+        let p = format!("{pct:.0}%");
+        let pw = f.width(&mono(), &p);
+        let (n, _) = bytes(d.used);
+        b.value(
+            c,
+            "used",
+            Rect::new(r.x, r.y, r.w - pw - GAP, 32.0),
+            &n,
+            &format!(" of {}", bytes_s(d.size)),
+            level_color(level("disk.usedPercent", pct)),
+        );
+        b.text_right(
+            c,
+            "pct",
+            Rect::new(r.right() - pw, r.y, pw, 32.0),
+            &p,
+            mono(),
+            INK2,
+        );
+        let st = level("disk.usedPercent", pct);
+        b.t.add(
+            Some(c),
+            "bar",
+            Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 10.0),
+            Paint::Bar {
+                pct: (pct / 100.0) as f32,
+                track: theme::TRACK,
+                fill: if st == Status::Good {
+                    INK2
+                } else {
+                    status_colors(st).shape
+                },
+            },
+        );
+        let y = r.y + 32.0 + MIN_GAP + 10.0 + MIN_GAP;
+        let (line, color) = if d.read_only {
+            ("Read-only: the disk reported errors".to_string(), down)
+        } else {
+            (d.link.clone(), INK3)
+        };
+        b.text(
+            c,
+            "line",
+            Rect::new(r.x, y, r.w, 16.0),
+            &line,
+            body(),
+            color,
+        );
+    } else {
+        b.value(
+            c,
+            "state",
+            Rect::new(r.x, r.y, r.w, 32.0),
+            "Not mounted",
+            "",
+            down,
+        );
+        b.text(
+            c,
+            "line",
+            Rect::new(r.x, r.y + 32.0 + MIN_GAP, r.w, 16.0),
+            "Apps that keep data here won't start",
+            body(),
+            INK2,
+        );
+        b.text(
+            c,
+            "hint",
+            Rect::new(r.x, r.y + 32.0 + MIN_GAP + 16.0 + MIN_GAP, r.w, 16.0),
+            "Check the USB cable and power",
+            body(),
+            INK3,
+        );
+    }
+
+    // health
+    let temp = d
+        .smart
+        .as_ref()
+        .and_then(|s| s.temp_c)
+        .map(|t| format!("{t:.0} °C"))
+        .unwrap_or_default();
+    let (c, r) = b.card(
+        "health",
+        Rect::new(M + 304.0 + GAP, TOP, WIDTH - 304.0 - GAP, 116.0),
+        "HEALTH",
+        &temp,
+    );
+    // awake, idle or asleep (the disk spins down when idle)
+    let state = match (d.smart.as_ref().is_some_and(|s| s.asleep), d.idle_sec) {
+        _ if !d.mounted => String::new(),
+        (true, _) => "Asleep".to_string(),
+        (false, Some(s)) if s >= 60 => format!("Idle {}", short_dur(s)),
+        (false, Some(_)) => "Busy".to_string(),
+        _ => String::new(),
+    };
+    b.text(
+        c,
+        "state",
+        Rect::new(r.x, r.y, r.w, 16.0),
+        &state,
+        body(),
+        INK2,
+    );
+    match &d.smart {
+        Some(s) => {
+            let st = smart_status(s);
+            let word = match st {
+                Status::Down => "Failing",
+                Status::Attention => "Check",
+                _ => "Good",
+            };
+            let color = if st == Status::Good {
+                INK
+            } else {
+                status_colors(st).shape
+            };
+            b.value(
+                c,
+                "verdict",
+                Rect::new(r.x, r.y + 16.0 + MIN_GAP, r.w, 28.0),
+                word,
+                "",
+                color,
+            );
+            let when = format!("checked {} ago", short_dur(s.age_sec));
+            b.text(
+                c,
+                "caption",
+                Rect::new(r.x, r.y + 16.0 + MIN_GAP + 28.0 + MIN_GAP, r.w, 16.0),
+                &when,
+                small(),
+                INK3,
+            );
+        }
+        None => b.note(
+            c,
+            Rect::new(r.x, r.y + 16.0 + MIN_GAP, r.w, 18.0),
+            if d.mounted {
+                "Not checked yet"
+            } else {
+                "Disk not found"
+            },
+        ),
+    }
+
+    // I/O right now
+    let (c, r) = b.card(
+        "io",
+        Rect::new(M, TOP + 124.0, 222.0, 120.0),
+        "RIGHT NOW",
+        "",
+    );
+    let mut y = r.y;
+    for (name, v, hist) in [("Read", d.read_bps, reads), ("Write", d.write_bps, writes)] {
+        let row =
+            b.t.add(Some(c), name, Rect::new(r.x, y, r.w, 32.0), Paint::None);
+        b.text(
+            row,
+            "name",
+            Rect::new(r.x, y, 40.0, 32.0),
+            name,
+            body(),
+            INK2,
+        );
+        b.text(
+            row,
+            "value",
+            Rect::new(r.x + 40.0 + GAP, y, 76.0, 32.0),
+            &rate(v),
+            mono(),
+            INK,
+        );
+        let sx = r.x + 40.0 + 76.0 + 2.0 * GAP;
+        b.t.add(
+            Some(row),
+            "spark",
+            Rect::new(sx, y + 2.0, r.right() - sx, 28.0),
+            Paint::Area {
+                values: hist.to_vec(),
+                min_span: 1024.0,
+                color: INK2,
+                guide: None,
+            },
+        );
+        y += 32.0 + GAP;
+    }
+
+    // drive: model, sectors, cable, self-test
+    let (c, r) = b.card(
+        "drive",
+        Rect::new(M + 222.0 + GAP, TOP + 124.0, WIDTH - 222.0 - GAP, 120.0),
+        "DRIVE",
+        &d.model,
+    );
+    let Some(s) = &d.smart else {
+        b.note(c, r, "No health report");
+        return;
+    };
+    let amber = status_colors(Status::Attention).shape;
+    let bad = s.reallocated + s.pending + s.uncorrectable;
+    let bad_now = s.pending + s.uncorrectable + s.reallocated_new > 0;
+    let cable = if s.crc_new > 0 {
+        format!("+{} new · {}", group(s.crc_new), group(s.crc))
+    } else {
+        group(s.crc)
+    };
+    let test = match (s.test.as_str(), s.test_ago_sec) {
+        ("", _) => "none yet".to_string(),
+        (t, Some(a)) => format!("{t} · {} ago", short_dur(a)),
+        (t, None) => t.to_string(),
+    };
+    let rows = [
+        ("Bad sectors", group(bad), if bad_now { amber } else { INK }),
+        (
+            "Cable errors",
+            cable,
+            if s.crc_new > 0 { amber } else { INK },
+        ),
+        (
+            "Self-test",
+            test,
+            if s.test == "failed" { amber } else { INK },
+        ),
+    ];
+    let mut y = r.y;
+    for (name, v, color) in rows {
+        let nw = f.width(&body(), name);
+        let row =
+            b.t.add(Some(c), name, Rect::new(r.x, y, r.w, 18.0), Paint::None);
+        b.text(row, "name", Rect::new(r.x, y, nw, 18.0), name, body(), INK2);
+        b.text_right(
+            row,
+            "value",
+            Rect::new(r.x + nw + GAP, y, r.w - nw - GAP, 18.0),
+            &v,
+            mono(),
+            color,
+        );
+        y += 18.0 + 6.0;
+    }
 }
 
 // ---------------- History ----------------
@@ -1465,6 +1784,19 @@ fn event_text(e: &Event) -> (String, String, Marker) {
                 .map(|ms| format!("was off {}", duration(ms)))
                 .unwrap_or_default(),
             Marker::Ring(INK2),
+        ),
+        "power_lost" => (
+            "Power lost".into(),
+            e.detail
+                .parse::<i64>()
+                .map(|ms| format!("no clean shutdown · off {}", duration(ms)))
+                .unwrap_or_else(|_| "no clean shutdown".into()),
+            Marker::Square(status_colors(Status::Down).shape),
+        ),
+        "power" => (
+            "Low voltage".into(),
+            e.detail.clone(),
+            Marker::Triangle(status_colors(Status::Attention).shape),
         ),
         "fan" => (
             if e.user == "cooler" {
@@ -1836,6 +2168,15 @@ pub fn incident(
 /// How a container is doing: red when it isn't running (as Home counts it), amber when Docker
 /// says it's unhealthy, restarting or paused.
 pub fn service_status(s: &Service) -> Status {
+    let st = run_status(s);
+    match s.note.as_ref().map_or(0, |n| n.level) {
+        2 => Status::Down,
+        1 => st.max(Status::Attention),
+        _ => st,
+    }
+}
+
+fn run_status(s: &Service) -> Status {
     match s.state.as_str() {
         "running" if s.health.as_deref() == Some("unhealthy") => Status::Attention,
         "running" => Status::Good,
@@ -1868,6 +2209,16 @@ fn short_dur(sec: u64) -> String {
 
 /// The tile's second line: health or uptime, and memory; or why it isn't running.
 fn tile_line(s: &Service) -> String {
+    let line = run_line(s);
+    match &s.note {
+        // a warning replaces the usual line (the row has room for one thing)
+        Some(n) if n.level > 0 => n.text.clone(),
+        Some(n) => format!("{line} · {}", n.text),
+        None => line,
+    }
+}
+
+fn run_line(s: &Service) -> String {
     let mem = s
         .mem
         .map(|m| format!(" · {}", bytes_s(m)))

@@ -260,6 +260,7 @@ mod tests {
                 ("a.example.com".into(), 200),
                 ("s3.example.com".into(), 403),
             ],
+            mounts: vec![],
         };
         let bad = vec![
             (

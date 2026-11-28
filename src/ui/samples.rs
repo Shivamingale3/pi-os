@@ -174,6 +174,81 @@ fn good_disk() -> DiskDetails {
             volumes: 5,
             volumes_bytes: 45 * 1024,
         }),
+        data: Some(good_data()),
+    }
+}
+
+/// A real data disk (2026-11-28): 1 TB USB disk holding app data.
+pub fn good_data() -> DataDisk {
+    DataDisk {
+        mount: "/mnt/data".into(),
+        mounted: true,
+        read_only: false,
+        label: "pidata".into(),
+        fstype: "ext4".into(),
+        used: 6_604 * MB,
+        size: 984_623_456_256,
+        percent: 1.0,
+        model: "ST1000LM035-1RK172".into(),
+        dev_size: 1_000_204_886_016,
+        link: "USB 3 · 5 Gb/s".into(),
+        read_bps: 0.0,
+        write_bps: 0.0,
+        idle_sec: Some(14 * 60),
+        smart: Some(Smart {
+            passed: true,
+            reallocated: 0,
+            pending: 0,
+            uncorrectable: 0,
+            crc: 3,
+            crc_new: 0,
+            reallocated_new: 0,
+            temp_c: Some(33.0),
+            hours: 7_216,
+            test: "passed".into(),
+            test_ago_sec: Some(2 * 86400),
+            asleep: false,
+            age_sec: 12 * 60,
+        }),
+    }
+}
+
+/// The data disk with problems: bad sectors waiting, new cable errors, a failed test, warm.
+pub fn attention_data() -> DataDisk {
+    let mut d = good_data();
+    d.percent = 91.0;
+    d.used = 896 * GB;
+    d.idle_sec = Some(5);
+    d.read_bps = 48e6;
+    d.write_bps = 21e6;
+    d.smart = Some(Smart {
+        pending: 8,
+        reallocated: 16,
+        crc: 5,
+        crc_new: 2,
+        reallocated_new: 16,
+        temp_c: Some(56.0),
+        test: "failed".into(),
+        test_ago_sec: Some(3 * 3600),
+        age_sec: 40,
+        ..good_data().smart.unwrap()
+    });
+    d
+}
+
+/// The data disk unplugged.
+pub fn down_data() -> DataDisk {
+    DataDisk {
+        mounted: false,
+        used: 0,
+        size: 0,
+        percent: 0.0,
+        model: String::new(),
+        dev_size: 0,
+        link: String::new(),
+        idle_sec: None,
+        smart: None,
+        ..good_data()
     }
 }
 
@@ -395,6 +470,37 @@ fn worst_disk() -> DiskDetails {
             volumes: 9999,
             volumes_bytes: 999 * GB * 1024,
         }),
+        data: Some(DataDisk {
+            mount: "/mnt/a-very-long-mount-point-name/with/many/levels".into(),
+            mounted: true,
+            read_only: true,
+            label: "a-very-long-filesystem-label".into(),
+            fstype: "ext4".into(),
+            used: 999 * GB * 1024 * 1024,
+            size: 1000 * GB * 1024 * 1024,
+            percent: 99.9,
+            model: "A VERY LONG DRIVE MODEL NAME WITH MANY WORDS 8TB".into(),
+            dev_size: 999 * GB * 1024,
+            link: "USB 3 · 5 Gb/s · a very long link description".into(),
+            read_bps: 9.9e12,
+            write_bps: 9.9e12,
+            idle_sec: Some(999 * 86400),
+            smart: Some(Smart {
+                passed: false,
+                reallocated: 999_999_999,
+                pending: 999_999_999,
+                uncorrectable: 999_999_999,
+                crc: 999_999_999,
+                crc_new: 999_999_999,
+                reallocated_new: 999_999_999,
+                temp_c: Some(99.0),
+                hours: 999_999,
+                test: "running 90 %".into(),
+                test_ago_sec: None,
+                asleep: true,
+                age_sec: 999 * 86400,
+            }),
+        }),
     }
 }
 
@@ -445,6 +551,7 @@ fn svc(
         restart: None,
         host: false,
         tasks: None,
+        note: None,
     }
 }
 
@@ -474,6 +581,14 @@ fn host_services(stopped: &[&str], long: bool) -> Vec<Service> {
                 mem: running.then_some(if long { 999 * GB * 1024 } else { m * MB }),
                 up_sec: running.then_some(if long { 999 * 86400 } else { 248 * 60 }),
                 tasks: running.then_some(if long { 99_999 } else { 4 }),
+                note: (n.starts_with("tailscale")).then(|| crate::services::Note {
+                    text: if long {
+                        "login expired 999 d ago · renew it in the Tailscale admin console".into()
+                    } else {
+                        "login ends in 162 d".into()
+                    },
+                    level: if long { 2 } else { 0 },
+                }),
                 name,
                 ..Service::default()
             }
@@ -648,6 +763,7 @@ pub fn sample_named(sample: &str, screen: &str) -> Option<App> {
     let mut a = sample_app(sample, Screen::parse(screen)?)?;
     a.tab = super::app::tab_for(screen);
     a.hist_tab = super::app::hist_tab_for(screen);
+    a.disk_tab = super::app::disk_tab_for(screen);
     Some(a)
 }
 
@@ -672,6 +788,8 @@ fn event(
 /// A plausible week: logins, sudo, deploys, a boot, a burst of failed logins.
 fn good_events() -> Vec<crate::events::Event> {
     vec![
+        event(4, "power", "", "", "supply voltage too low", 1),
+        event(9, "power_lost", "", "", "120000", 1),
         event(19, "ssh", "admin", "100.64.0.7", "", 3),
         event(22, "deploy", "pios-deploy", "", "v0.7.3", 1),
         event(48, "sudo", "admin", "", "systemctl status nginx", 1),
@@ -688,7 +806,16 @@ fn good_events() -> Vec<crate::events::Event> {
 fn worst_events() -> Vec<crate::events::Event> {
     (0..60)
         .map(|i| {
-            let kinds = ["ssh", "ssh_failed", "sudo", "deploy", "boot", "other"];
+            let kinds = [
+                "ssh",
+                "ssh_failed",
+                "sudo",
+                "deploy",
+                "boot",
+                "power_lost",
+                "power",
+                "other",
+            ];
             event(
                 i * 97,
                 kinds[i as usize % kinds.len()],
@@ -718,6 +845,8 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             a.temp_trend = curve(96, 100.0, 8.0, 1.0, None);
             a.reads = curve(12, 9e12, 1e12, 0.0, None).into();
             a.writes = curve(12, 9e12, 1e12, 1.0, None).into();
+            a.data_reads = curve(12, 9e12, 1e12, 0.0, None).into();
+            a.data_writes = curve(12, 9e12, 1e12, 1.0, None).into();
             let list = worst_incidents();
             a.incident = Some(IncidentFull {
                 incident: list[0].clone(),
@@ -733,7 +862,23 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             a.cpu = Some(good_cpu());
             a.temps = Some(good_temps());
             a.mem = Some(good_mem());
-            a.disk = Some(good_disk());
+            let mut disk = good_disk();
+            disk.data = Some(match name {
+                "attention" => attention_data(),
+                "down" => down_data(),
+                _ => good_data(),
+            });
+            a.disk = Some(disk);
+            a.data_reads = if name == "attention" {
+                curve(12, 40e6, 20e6, 0.7, None).into()
+            } else {
+                vec![0.0; 12].into()
+            };
+            a.data_writes = if name == "attention" {
+                curve(12, 20e6, 10e6, 1.3, None).into()
+            } else {
+                vec![0.0; 12].into()
+            };
             a.cpu_trend = curve(96, 3.0, 1.5, 0.4, Some((60, 11.0)));
             a.temp_trend = curve(96, 38.0, 1.0, 1.2, Some((60, 2.0)));
             a.reads = vec![
@@ -748,7 +893,22 @@ pub fn sample_app(name: &str, screen: Screen) -> Option<App> {
             a.incident = Some(full(list[2].clone(), &home, true));
             a.incidents = Some(list);
             a.events = Some(good_events());
-            a.services = Some(good_services((name == "down").then_some("cache")));
+            let mut sv = good_services((name == "down").then_some("cache"));
+            // Tailscale's login: ends soon (attention), expired (down)
+            if let Some(t) = sv.host.iter_mut().find(|s| s.name == "tailscaled") {
+                t.note = match name {
+                    "attention" => Some(crate::services::Note {
+                        text: "login ends in 6 d".into(),
+                        level: 1,
+                    }),
+                    "down" => Some(crate::services::Note {
+                        text: "login expired 2 d ago".into(),
+                        level: 2,
+                    }),
+                    _ => t.note.clone(),
+                };
+            }
+            a.services = Some(sv);
             a.svc_cpu = vec![1.2, 1.4, 1.1, 2.0, 1.8, 1.5, 1.6, 2.4, 1.9, 1.7, 2.1, 2.0].into();
             a.svc_mem = [140, 141, 141, 142, 143, 143, 144, 145, 145, 146, 146, 146]
                 .map(|m| (m * MB) as f32)
