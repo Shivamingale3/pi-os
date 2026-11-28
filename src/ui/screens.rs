@@ -1787,10 +1787,9 @@ fn event_text(e: &Event) -> (String, String, Marker) {
         ),
         "power_lost" => (
             "Power lost".into(),
-            e.detail
-                .parse::<i64>()
+            crate::events::known_off(&e.detail)
                 .map(|ms| format!("no clean shutdown · off {}", duration(ms)))
-                .unwrap_or_else(|_| "no clean shutdown".into()),
+                .unwrap_or_else(|| "no clean shutdown".into()),
             Marker::Square(status_colors(Status::Down).shape),
         ),
         "power" => (

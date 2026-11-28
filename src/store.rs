@@ -195,6 +195,14 @@ impl Store {
 
     /// Folds the WAL back into the main file (on shutdown), so a stopped agent leaves one file.
     /// Adds events (duplicates ignored); returns the ones that were new.
+    /// A boot once marked "power_lost" that turned out to be clean (an older, stricter check).
+    pub fn unmark_power_lost(&self, ts: i64) -> Result<usize> {
+        Ok(self.conn.execute(
+            "DELETE FROM events WHERE kind = 'power_lost' AND ts = ?1",
+            [ts],
+        )?)
+    }
+
     pub fn insert_events(
         &self,
         list: &[crate::events::Event],
