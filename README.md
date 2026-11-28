@@ -56,6 +56,9 @@ Trend metrics: `cpu.percent` · `cpu.tempC` · `mem.usedPercent` · `disk.usedPe
 | Docker | Docker was reachable in this run and no longer is | it's reachable again |
 | host service | a `host` service from `/etc/pios/checks` isn't running | it's running again |
 | website | a `web` hostname failed 2 checks in a row (warn: an unexpected code; critical: no answer or 5xx) | it answers the expected code |
+| data disk | the `mount` disk isn't mounted or turned read-only (critical); its space ≥ 85 % (critical ≥ 95); its health report: failing or ≥ 60 °C (critical), unreadable or new bad sectors, new cable errors, a failed self-test or ≥ 55 °C (warn) | the condition clears |
+| Tailscale | its login ends within 14 days (warn), has expired, or it's logged out (critical) | logged in with time to spare |
+| voltage | the Pi's under-voltage alarm is on (warn) | the alarm clears |
 
 An incident **opens after 30 s** of the bad condition without a break, and **closes after 60 s**
 of the clear condition without a break, so short spikes and flapping are ignored. Start and end
@@ -72,6 +75,7 @@ host nginx                    # a systemd service that should be running
 web status.example.com        # https://HOST/ should answer 200
 web s3.example.com 403        # …or the code given (redirects aren't followed)
 web cloud.example.com/status.php   # a path: an app's own health page
+mount /mnt/data               # a data disk that should be mounted there
 ```
 
 - **Host services** are read from their cgroup (`/sys/fs/cgroup/system.slice/NAME.service`):
@@ -81,6 +85,16 @@ web cloud.example.com/status.php   # a path: an app's own health page
   process with network access, under its own throwaway user (`DynamicUser`); it writes
   `/run/pios-web/web.json`, which the agent reads (results older than 3 minutes are ignored).
   The agent itself stays on unix sockets only.
+- **A data disk** (`mount`, the first one; the Disk screen's *Data* tab): mounted and writable
+  (`/proc/self/mountinfo`), space, I/O and idle time (sysfs), label (udev's database), USB link
+  speed. Its health report (SMART: verdict, bad sectors, cable errors, temperature, last
+  self-test) comes from the helper running `smartctl -n standby` every 30 min, so a sleeping disk
+  is never woken (needs `smartmontools`). Cable-error and bad-sector rises count as new for a day.
+- **Tailscale** (when `tailscaled` runs): its state and login expiry from its local API socket,
+  every 10 min, shown on the `tailscaled` host row.
+- **Power**: the `rpi_volt` under-voltage alarm every 5 s (an event when it trips), and after each
+  boot whether the one before ended with a clean shutdown; if not, History shows **Power lost**
+  and a problem alert goes out.
 
 ## Phone alerts (Telegram)
 
@@ -194,7 +208,7 @@ binary and are installed by `pios setup`.
 | Unit | Runs as | What |
 |---|---|---|
 | `pios-agent.service` | `pios` (no shell, no Docker group; in `systemd-journal` to read the journal) | the agent. Nice 10, idle IO, `CPUQuota=15%`, `MemoryHigh=24M` (trims the journal's page cache early), `MemoryMax=80M`, unix sockets only, read-only system, syscall filter |
-| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403 |
+| `pios-helper.socket` + `.service` | root, sandboxed, no network | the **only** process that touches Docker. It forwards exactly `GET /containers/json?all=true`, `GET /system/df` and one action, `POST /containers/ID/restart?t=10` for a full 64-hex ID (rebuilt from the ID, at most 2 at once); anything else gets 403. It also runs `smartctl` for `GET /smart/sdX` (an sd disk name only), with `CAP_SYS_RAWIO` and read access to sd* block devices and nothing else |
 | `pios-web.service` | throwaway (`DynamicUser`) | the website checks: one `curl --parallel` a minute, results in `/run/pios-web/`. The only unit with network access. `MemoryMax=48M`, `CPUQuota=10%`, read-only system |
 | `pios-ui.service` (installed; **you** enable it) | `pios-ui` (groups video, input, pios) | the screen: Home on `/dev/fb0`, sending only changed rows; resistive touch with the libinput calibration matrix; backlight off after 30 min idle (a touch wakes it); the LED ring (its PWM channel is opened to `pios-ui` at start, dark again at stop). `Conflicts=tft-btop.service case-ring-breathe.service`. `MemoryMax=60M`, `CPUQuota=10%`, only `/dev/fb0` and input devices allowed |
 

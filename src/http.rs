@@ -14,15 +14,26 @@ const MAX_RESPONSE: u64 = 4 * 1024 * 1024;
 
 /// Returns (status code, body).
 pub fn get(socket: &Path, path: &str, timeout: Duration) -> Result<(u16, String)> {
-    request(socket, "GET", path, timeout)
+    request(socket, "GET", "localhost", path, timeout)
+}
+
+/// A GET with another Host header (tailscaled's local API only answers `local-tailscaled.sock`).
+pub fn get_host(socket: &Path, host: &str, path: &str, timeout: Duration) -> Result<(u16, String)> {
+    request(socket, "GET", host, path, timeout)
 }
 
 /// A POST without a body (Docker's restart, the agent's restart).
 pub fn post(socket: &Path, path: &str, timeout: Duration) -> Result<(u16, String)> {
-    request(socket, "POST", path, timeout)
+    request(socket, "POST", "localhost", path, timeout)
 }
 
-fn request(socket: &Path, method: &str, path: &str, timeout: Duration) -> Result<(u16, String)> {
+fn request(
+    socket: &Path,
+    method: &str,
+    host: &str,
+    path: &str,
+    timeout: Duration,
+) -> Result<(u16, String)> {
     let mut stream =
         UnixStream::connect(socket).map_err(|e| err(format!("{}: {e}", socket.display())))?;
     stream.set_read_timeout(Some(timeout))?;
@@ -32,9 +43,8 @@ fn request(socket: &Path, method: &str, path: &str, timeout: Duration) -> Result
     } else {
         ""
     };
-    stream.write_all(
-        format!("{method} {path} HTTP/1.0\r\nHost: localhost\r\n{len}\r\n").as_bytes(),
-    )?;
+    stream
+        .write_all(format!("{method} {path} HTTP/1.0\r\nHost: {host}\r\n{len}\r\n").as_bytes())?;
     let mut raw = Vec::new();
     stream.take(MAX_RESPONSE).read_to_end(&mut raw)?;
     parse_response(&raw)

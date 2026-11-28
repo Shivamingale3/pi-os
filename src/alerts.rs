@@ -211,6 +211,17 @@ pub fn from_event(e: &crate::events::Event) -> Option<(&'static str, String)> {
                 Err(_) => "🔄 The Pi booted".to_string(),
             },
         ),
+        // a problem, not a routine reboot: it goes out with the Problems setting
+        "power_lost" => (
+            PROBLEM,
+            match e.detail.parse::<i64>() {
+                Ok(off) => format!(
+                    "⚡ The Pi lost power: no clean shutdown, back after {}",
+                    took(off)
+                ),
+                Err(_) => "⚡ The Pi lost power: no clean shutdown".to_string(),
+            },
+        ),
         "ssh" => (SSH, format!("🔑 SSH: {} from {}", e.user, e.from)),
         "sudo" => (SUDO, format!("🛡️ sudo: {}: {}", e.user, e.detail)),
         _ => return None,
@@ -243,6 +254,24 @@ mod tests {
             severity: severity.into(),
             text: "x".into(),
         }
+    }
+
+    #[test]
+    fn power_lost_is_a_problem_alert() {
+        let e = crate::events::Event {
+            ts: 0,
+            kind: "power_lost".into(),
+            user: String::new(),
+            from: String::new(),
+            detail: "120000".into(),
+            count: 1,
+        };
+        let (kind, text) = from_event(&e).unwrap();
+        assert_eq!(kind, PROBLEM);
+        assert_eq!(
+            text,
+            "⚡ The Pi lost power: no clean shutdown, back after 2 m"
+        );
     }
 
     #[test]

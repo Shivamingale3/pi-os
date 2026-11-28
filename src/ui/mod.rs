@@ -242,6 +242,9 @@ pub fn sample_snapshot(
         }),
         units: Some(sample_units(&[])),
         web: Some(sample_web(&[])),
+        data_disk: None,
+        tailscale: None,
+        checks: vec![],
     }
 }
 
@@ -404,6 +407,7 @@ struct Args {
     screen: app::Screen,
     tab: screens::Tab,
     hist_tab: screens::HistTab,
+    disk_tab: screens::DiskTab,
     check: bool,
     scale: usize,
 }
@@ -418,6 +422,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
         screen: app::Screen::Home,
         tab: screens::Tab::Apps,
         hist_tab: screens::HistTab::Incidents,
+        disk_tab: screens::DiskTab::Ssd,
         check: false,
         scale: 2,
     };
@@ -444,6 +449,7 @@ fn parse_args(args: &[String]) -> Result<Args> {
                 })?;
                 a.tab = app::tab_for(&s);
                 a.hist_tab = app::hist_tab_for(&s);
+                a.disk_tab = app::disk_tab_for(&s);
             }
             "--check" => a.check = true,
             "--scale" => {
@@ -518,6 +524,7 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
                 )?;
                 ap.tab = app::tab_for(s);
                 ap.hist_tab = app::hist_tab_for(s);
+                ap.disk_tab = app::disk_tab_for(s);
                 let v = layout::check(&tree_for(&ap, &fonts));
                 println!(
                     "{n} · {s}: {}",
@@ -542,8 +549,7 @@ pub fn run(args: &[String], socket: &Path) -> Result<()> {
         let mut ap = make_app(a.sample.as_deref(), a.screen, socket)?;
         ap.tab = a.tab;
         ap.hist_tab = a.hist_tab;
-        ap.hist_tab = a.hist_tab;
-        ap.tab = a.tab;
+        ap.disk_tab = a.disk_tab;
         let c = panel::frame(&tree_for(&ap, &fonts), &fonts, None);
         c.pm.save_png(path)
             .map_err(|e| err(format!("{}: {e}", path.display())))?;

@@ -63,6 +63,27 @@ pub struct Service {
     /// processes and threads in it (host services)
     #[serde(default)]
     pub tasks: Option<u64>,
+    /// something more to say about it ("login ends in 162 d" for tailscaled)
+    #[serde(default)]
+    pub note: Option<Note>,
+}
+
+/// Tailscale's login on its host service row ("login ends in 162 d"), if it's watched.
+pub fn note_tailscale(host: &mut [Service], t: &crate::types::Tailscale, now: i64) {
+    if let Some(s) = host.iter_mut().find(|s| s.name == "tailscaled") {
+        let (text, level) = crate::watch::tailscale_note(t, now);
+        s.note = Some(Note { text, level });
+    }
+}
+
+/// A note on a service; `level` 1 or 2 makes the service amber or red even while it runs.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Note {
+    pub text: String,
+    /// 0 information, 1 attention, 2 down
+    #[serde(default)]
+    pub level: u8,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

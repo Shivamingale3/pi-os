@@ -4,6 +4,7 @@
 //! ```text
 //! # host NAME           a systemd service (NAME or NAME.service) that should be running
 //! # web HOST[/PATH] [CODE]   https://HOST/PATH should answer CODE (default 200)
+//! # mount PATH          a data disk that should be mounted there (the first one is watched)
 //! host nginx
 //! web status.example.com 200
 //! web s3.example.com 403
@@ -28,6 +29,8 @@ pub struct Config {
     pub host: Vec<String>,
     /// (hostname, expected code)
     pub web: Vec<(String, u16)>,
+    /// mount points of data disks (`mount` lines)
+    pub mounts: Vec<String>,
 }
 
 pub fn path() -> PathBuf {
@@ -62,6 +65,18 @@ fn is_hostname(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"-.".contains(&b))
 }
 
+/// An absolute mount point: `/` then plain path characters, no `..`, not `/` itself.
+fn is_mount(s: &str) -> bool {
+    s.len() > 1
+        && s.len() <= 200
+        && s.starts_with('/')
+        && !s.ends_with('/')
+        && !s.contains("..")
+        && !s.contains("//")
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+}
+
 /// `HOST` or `HOST/PATH`; the path is plain URL characters only (it goes to curl as one argument,
 /// never through a shell, but stays boring anyway).
 fn is_target(s: &str) -> bool {
@@ -89,6 +104,11 @@ pub fn parse(text: &str) -> (Config, Vec<String>) {
                 let name = name.trim_end_matches(".service").to_string();
                 if !c.host.contains(&name) {
                     c.host.push(name);
+                }
+            }
+            ["mount", path] if is_mount(path) => {
+                if !c.mounts.iter().any(|m| m == path) {
+                    c.mounts.push(path.to_string());
                 }
             }
             ["web", host, rest @ ..] if is_target(host) && rest.len() <= 1 => {
@@ -193,6 +213,16 @@ mod tests {
     }
 
     #[test]
+    fn mount_lines() {
+        let (c, w) = parse(
+            "mount /mnt/data\nmount /mnt/data\nmount /\nmount mnt/x\nmount /mnt/../etc\n\
+             mount /mnt/a b\nmount /mnt/x;rm\nmount /media/backup-1\nmount /mnt/data/\n",
+        );
+        assert_eq!(c.mounts, ["/mnt/data", "/media/backup-1"]);
+        assert_eq!(w.len(), 6, "{w:?}");
+    }
+
+    #[test]
     fn cgroup_events() {
         assert!(populated("populated 1\nfrozen 0\n"));
         assert!(!populated("populated 0\nfrozen 0\n"));
@@ -215,6 +245,7 @@ mod tests {
         let cfg = Config {
             host: vec![],
             web: vec![("a.example.com".into(), 200)],
+            mounts: vec![],
         };
         assert!(web(&cfg, &out, 1_000_000 + WEB_STALE_MS).is_some());
         assert!(web(&cfg, &out, 1_000_001 + WEB_STALE_MS).is_none());

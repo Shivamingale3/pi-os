@@ -40,6 +40,7 @@ mod telegram;
 mod types;
 mod ui;
 mod update;
+mod watch;
 mod web;
 
 use std::collections::HashMap;
@@ -234,7 +235,12 @@ fn api_socket() -> PathBuf {
 }
 
 /// New SSH / sudo lines since the saved cursor (and, when due, the boot list) into the store.
-fn poll_events(store: &Store, boots: bool) -> Result<()> {
+/// `clean`: which past boots ended with a clean shutdown (asked once each; they never change).
+fn poll_events(
+    store: &Store,
+    boots: bool,
+    clean: &mut HashMap<String, Option<bool>>,
+) -> Result<()> {
     const CURSOR: &str = "journal_cursor";
     let cursor = store.get_kv(CURSOR);
     let (list, next) = events::read_journal(cursor.as_deref())?;
@@ -243,7 +249,15 @@ fn poll_events(store: &Store, boots: bool) -> Result<()> {
         store.set_kv(CURSOR, &c)?;
     }
     if boots {
-        let list: Vec<events::Event> = events::read_boots()?.into_iter().map(|(_, e)| e).collect();
+        let mut list = events::read_boots()?;
+        // the newest boot is still running: only the ones before it have ended
+        for (id, _) in list.iter().rev().skip(1) {
+            if !clean.contains_key(id) {
+                clean.insert(id.clone(), events::ended_cleanly(id));
+            }
+        }
+        events::mark_power_lost(&mut list, &|id| clean.get(id).copied().flatten());
+        let list: Vec<events::Event> = list.into_iter().map(|(_, e)| e).collect();
         new.extend(store.insert_events(&list)?);
     }
     // phone alerts for what just happened (not for history read back on a first run)
@@ -283,6 +297,7 @@ fn agent() -> Result<()> {
     }
 
     let mut collector = collect::Collector::new(docker_socket())?;
+    let mut watch = watch::Watch::new();
     let mut engine = Engine::new();
     let mut incidents = Incidents {
         open: HashMap::new(),
@@ -308,6 +323,7 @@ fn agent() -> Result<()> {
     let mut last_events: Option<Instant> = None;
     let mut last_boots = Instant::now();
     let mut events_err: Option<String> = None;
+    let mut clean_boots: HashMap<String, Option<bool>> = HashMap::new();
     let mut last_snapshot: Option<Snapshot> = None;
 
     while !signals::stopping() {
@@ -320,13 +336,14 @@ fn agent() -> Result<()> {
             next = Instant::now() + INTERVAL; // fell behind (suspend, stall): don't burst
         }
 
-        let snap = match collector.collect() {
+        let mut snap = match collector.collect() {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("pios: collect: {e}");
                 continue;
             }
         };
+        watch.tick(&mut snap, collector.mounts(), &store, &docker_socket());
         if let Ok(mut g) = live.write() {
             *g = Some(snap.clone());
         }
@@ -352,7 +369,7 @@ fn agent() -> Result<()> {
             if boots_due {
                 last_boots = Instant::now();
             }
-            if let Err(e) = poll_events(&store, boots_due) {
+            if let Err(e) = poll_events(&store, boots_due, &mut clean_boots) {
                 // once per distinct error, not every minute
                 let msg = e.to_string();
                 if events_err.as_deref() != Some(msg.as_str()) {

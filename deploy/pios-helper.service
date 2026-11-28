@@ -1,7 +1,8 @@
 # Root, started by pios-helper.socket. Forwards an allow-list of Docker requests (see
-# helper.rs) and edits fan_ctl's manual override; refuses everything else.
+# helper.rs), edits fan_ctl's manual override and reads data disks' health (smartctl);
+# refuses everything else.
 [Unit]
-Description=PiOS helper (filtered Docker access)
+Description=PiOS helper (filtered Docker access, disk health)
 Requires=pios-helper.socket
 # /run/fan_ctl must exist when the helper starts, for the ReadWritePaths= below
 After=fan_ctl.service
@@ -13,17 +14,21 @@ Environment=PIOS_DOCKER_SOCKET=/var/run/docker.sock
 
 Nice=10
 CPUQuota=5%
-MemoryMax=16M
-TasksMax=4
+MemoryMax=24M
+# itself, 2 restarts, smartctl and its output reader
+TasksMax=6
 
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+# smartctl's ATA pass-through needs this one capability, and only sd* disks, read-only
+CapabilityBoundingSet=CAP_SYS_RAWIO
+DevicePolicy=closed
+DeviceAllow=block-sd r
 ProtectSystem=strict
 # the only path it writes: fan_ctl's override (fan_ctl ≥ 0.2 keeps the directory; "-": optional)
 ReadWritePaths=-/run/fan_ctl
 ProtectHome=yes
 PrivateTmp=yes
-PrivateDevices=yes
+PrivateDevices=no
 PrivateNetwork=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

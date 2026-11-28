@@ -334,8 +334,11 @@ mod tests {
         let helper = UNITS[2].1;
         for line in [
             "PrivateNetwork=yes",
-            "MemoryMax=16M",
-            "CapabilityBoundingSet=",
+            "MemoryMax=24M",
+            // one capability (smartctl), and only sd disks, read-only
+            "CapabilityBoundingSet=CAP_SYS_RAWIO",
+            "DevicePolicy=closed",
+            "DeviceAllow=block-sd r",
             "ProtectSystem=strict",
         ] {
             assert!(
