@@ -257,6 +257,9 @@ fn poll_events(
             }
         }
         events::mark_power_lost(&mut list, &|id| clean.get(id).copied().flatten());
+        for (_, e) in list.iter().filter(|(_, e)| e.kind == "boot") {
+            store.unmark_power_lost(e.ts)?;
+        }
         let list: Vec<events::Event> = list.into_iter().map(|(_, e)| e).collect();
         new.extend(store.insert_events(&list)?);
     }

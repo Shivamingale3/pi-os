@@ -214,12 +214,12 @@ pub fn from_event(e: &crate::events::Event) -> Option<(&'static str, String)> {
         // a problem, not a routine reboot: it goes out with the Problems setting
         "power_lost" => (
             PROBLEM,
-            match e.detail.parse::<i64>() {
-                Ok(off) => format!(
+            match crate::events::known_off(&e.detail) {
+                Some(off) => format!(
                     "⚡ The Pi lost power: no clean shutdown, back after {}",
                     took(off)
                 ),
-                Err(_) => "⚡ The Pi lost power: no clean shutdown".to_string(),
+                None => "⚡ The Pi lost power: no clean shutdown, back now".to_string(),
             },
         ),
         "ssh" => (SSH, format!("🔑 SSH: {} from {}", e.user, e.from)),

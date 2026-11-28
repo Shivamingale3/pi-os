@@ -275,8 +275,9 @@ pub fn parse_boots(text: &str) -> Vec<(String, Event)> {
     out
 }
 
-/// Did this boot end with a clean shutdown? systemd's last words on one are "Shutting down.";
-/// after a power cut or a hard reset the journal just stops. None: can't tell (no journal).
+/// Did this boot end with a clean shutdown? systemd says "Shutting down." at the very end of one
+/// (a reboot adds a line about the hardware watchdog after it); after a power cut or a hard
+/// reset the journal just stops. None: can't tell (no journal).
 pub fn ended_cleanly(boot_id: &str) -> Option<bool> {
     if boot_id.len() != 32 || !boot_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
@@ -288,20 +289,28 @@ pub fn ended_cleanly(boot_id: &str) -> Option<bool> {
             boot_id,
             "_PID=1",
             "-n",
-            "1",
+            "5",
             "-o",
             "cat",
         ])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let last = text.lines().last()?.trim();
-    Some(clean_end(last))
+    if text.trim().is_empty() {
+        return None;
+    }
+    Some(text.lines().any(|l| clean_end(l.trim())))
 }
 
 /// systemd's last line on a clean shutdown, reboot, halt or kexec.
 pub fn clean_end(last: &str) -> bool {
     last.starts_with("Shutting down")
+}
+
+/// The Pi has no clock battery: after a power cut it starts from the last saved time, so the
+/// time between two boots isn't how long it was off. Under a minute is shown as unknown.
+pub fn known_off(detail: &str) -> Option<i64> {
+    detail.parse::<i64>().ok().filter(|ms| *ms >= 60_000)
 }
 
 /// Boots after one that didn't end cleanly become "power_lost" (same time and off-time).
@@ -511,6 +520,8 @@ not json"#;
         assert_eq!(kinds, ["boot", "boot", "power_lost"]);
         assert_eq!(b[2].1.detail, "120000", "keeps how long it was off");
         assert!(clean_end("Shutting down."));
+        assert_eq!(known_off("120000"), Some(120_000));
+        assert_eq!(known_off("12000"), None, "the clock can't tell");
         assert!(!clean_end(
             "Finished apt-daily.service - Daily apt download activities."
         ));

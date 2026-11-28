@@ -416,6 +416,9 @@ pub struct Smart {
     /// seconds since that test ended (None: unknown or still running)
     #[serde(default)]
     pub test_ago_sec: Option<u64>,
+    /// the disk's own model name (a USB bridge often cuts the one in sysfs short)
+    #[serde(default)]
+    pub model: String,
     /// in standby when last asked (it is never woken just to be asked)
     #[serde(default)]
     pub asleep: bool,

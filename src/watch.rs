@@ -215,6 +215,9 @@ impl Watch {
             }
             let mut s = s.clone();
             s.age_sec = now.duration_since(*at).as_secs();
+            if !s.model.is_empty() {
+                d.model = s.model.clone();
+            }
             d.smart = Some(s);
         }
         d
@@ -383,6 +386,7 @@ pub fn parse_smart(r: &SmartReply) -> Option<Answer> {
         hours,
         test,
         test_ago_sec,
+        model: o["model_name"].as_str().unwrap_or("").trim().to_string(),
         asleep: false,
         age_sec: 0,
     }))
@@ -608,6 +612,7 @@ mod tests {
     fn smart_report() {
         // trimmed from smartctl 7.4 -j on the real disk (-d sat, through a USB bridge)
         let v = serde_json::json!({
+            "model_name": "ST1000LM035-1RK172",
             "smart_status": {"passed": true},
             "temperature": {"current": 47},
             "power_on_time": {"hours": 7217},
@@ -629,6 +634,7 @@ mod tests {
         assert_eq!((s.crc, s.reallocated, s.pending), (3, 0, 0));
         assert_eq!(s.temp_c, Some(47.0));
         assert_eq!(s.test, "passed");
+        assert_eq!(s.model, "ST1000LM035-1RK172");
         assert_eq!(s.test_ago_sec, Some(48 * 3600));
         assert_eq!(s.level().0, 0);
 

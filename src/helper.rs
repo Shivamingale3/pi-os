@@ -59,9 +59,11 @@ const SMART_TIMEOUT: Duration = Duration::from_secs(25);
 /// smartctl's arguments for one disk: JSON, health, attributes, self-test log; never wake it.
 /// A disk behind a USB bridge needs `-d sat` (smartctl 7.4 doesn't know every bridge).
 pub fn smart_args(dev: &str, usb: bool) -> Vec<String> {
-    let mut a: Vec<String> = ["-j", "-n", "standby", "-H", "-A", "-c", "-l", "selftest"]
-        .map(String::from)
-        .to_vec();
+    let mut a: Vec<String> = [
+        "-j", "-n", "standby", "-i", "-H", "-A", "-c", "-l", "selftest",
+    ]
+    .map(String::from)
+    .to_vec();
     if usb {
         a.extend(["-d".to_string(), "sat".to_string()]);
     }
@@ -301,7 +303,7 @@ mod tests {
         assert_eq!(decide("POST", "/smart/sda").map(|d| d.0), Some(403));
         assert_eq!(
             smart_args("sda", true).join(" "),
-            "-j -n standby -H -A -c -l selftest -d sat /dev/sda"
+            "-j -n standby -i -H -A -c -l selftest -d sat /dev/sda"
         );
         assert!(!smart_args("sdb", false).contains(&"sat".to_string()));
     }
